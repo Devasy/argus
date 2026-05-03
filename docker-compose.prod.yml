@@ -1,0 +1,59 @@
+# Production stack: db (pgvector, persistent) + backend (API + poller + worker).
+#
+# Usage:
+#   1. cp .env.prod.example .env.prod   # fill in secrets
+#   2. (optional) drop the internal CA at ./certs/ca.pem
+#   3. docker compose -f docker-compose.prod.yml up -d --build
+#   4. curl http://localhost:8100/health
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-argus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-argus}
+      POSTGRES_DB: ${POSTGRES_DB:-argus}
+    volumes:
+      - argus_pgdata:/var/lib/postgresql/data
+      - ./docker/initdb.d:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-argus}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env.prod
+    environment:
+      ARGUS_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-argus}:${POSTGRES_PASSWORD:-argus}@db:5432/${POSTGRES_DB:-argus}
+      ARGUS_POLLER_ENABLED: "true"
+      ARGUS_WORKER_ENABLED: "true"
+      ARGUS_VALIDATE_EMBEDDINGS_ON_BOOT: "true"
+      ARGUS_WORKSPACE_ROOT: /workspaces
+      ARGUS_LOG_DIR: /logs
+    volumes:
+      - ./certs:/certs:ro
+      - argus_workspaces:/workspaces
+      - ./logs:/logs
+    ports:
+      - "8100:8100"
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+
+volumes:
+  argus_pgdata:
+  argus_workspaces:
