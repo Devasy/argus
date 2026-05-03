@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="MM_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="ARGUS_", env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+asyncpg://argus:argus@localhost:5433/argus"
     api_token: str = ""

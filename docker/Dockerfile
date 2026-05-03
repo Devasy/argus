@@ -5,11 +5,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl ca-certificates\
     && rm -rf /var/lib/apt/lists/*
 
-ARG INTERNAL_GITLAB_HOST=gitlab.example.internal
-RUN openssl s_client -connect "${INTERNAL_GITLAB_HOST}:443" -showcerts </dev/null 2>/dev/null \
-        | openssl x509 -outform PEM \
-        > /usr/local/share/ca-certificates/gitlab-internal.crt \
-    && update-ca-certificates
+# Use system certificate trust store
+RUN update-ca-certificates
 
 WORKDIR /app
 
