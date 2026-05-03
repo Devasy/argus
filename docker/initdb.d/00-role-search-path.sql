@@ -1,0 +1,11 @@
+-- Alembic's autogenerate compares the reflected schema against declared
+-- metadata by resolving current_schema(). Postgres' default role search_path
+-- is '"$user", public', and "$user" resolves to a same-named schema when one
+-- exists (here: "argus") — this makes reflected objects report as
+-- schema=None while declared metadata says schema="argus", producing a
+-- full spurious add/remove diff on every `alembic check`/`alembic revision
+-- --autogenerate`, even with zero real drift. Pinning search_path to just
+-- "public" removes the ambiguity. Runs once, at first container init, via
+-- Postgres' /docker-entrypoint-initdb.d convention (only executes against an
+-- empty data directory — re-running against an existing volume is a no-op).
+ALTER ROLE CURRENT_USER SET search_path = public;

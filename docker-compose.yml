@@ -1,0 +1,13 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: argus
+      POSTGRES_PASSWORD: argus
+      POSTGRES_DB: argus
+    ports: ["127.0.0.1:5433:5432"]
+    volumes:
+      - "argus_pgdata:/var/lib/postgresql/data"
+      - "./docker/initdb.d:/docker-entrypoint-initdb.d"
+volumes:
+  argus_pgdata:
