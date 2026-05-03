@@ -16,7 +16,7 @@ if config.config_file_name is not None:
     # caplog-based assertions in any test that runs after a real migration
     # in the same pytest session.
     fileConfig(config.config_file_name, disable_existing_loggers=False)
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
 target_metadata = Base.metadata
 
 
@@ -45,6 +45,8 @@ def run_migrations_offline() -> None:
                       include_name=include_name,
                       include_object=include_object)
     with context.begin_transaction():
+        context.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        context.execute("CREATE SCHEMA IF NOT EXISTS argus")
         context.run_migrations()
 
 

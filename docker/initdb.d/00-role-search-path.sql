@@ -8,4 +8,4 @@
 -- "public" removes the ambiguity. Runs once, at first container init, via
 -- Postgres' /docker-entrypoint-initdb.d convention (only executes against an
 -- empty data directory — re-running against an existing volume is a no-op).
-ALTER ROLE argus SET search_path = public;
+ALTER ROLE CURRENT_USER SET search_path = public;

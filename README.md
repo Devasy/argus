@@ -59,7 +59,7 @@ and the applied migrations agree — i.e. there is no unmigrated model drift.
 uvicorn argus.api.app:app --port 8100
 ```
 
-Key environment variables (all read via `argus.config.Settings`, prefix `MM_`):
+Key environment variables (all read via `argus.config.Settings`, prefix `ARGUS_`):
 
 - `ARGUS_DATABASE_URL` — Postgres connection string (asyncpg driver)
 - `ARGUS_GITLAB_URL` — base URL of the GitLab instance to ingest from
@@ -74,7 +74,7 @@ See `.env.example` for a sample configuration.
 Non-secret settings can be overridden at runtime via the database, allowing live configuration changes without restarting the API. Settings precedence (highest to lowest):
 
 1. **Database** (`runtime_settings` table) — set via `PUT /settings` from the UI
-2. **Environment variables** (`MM_*` prefix) — bootstrap defaults, always available
+2. **Environment variables** (`ARGUS_*` prefix) — bootstrap defaults, always available
 3. **Code defaults** — hardcoded application defaults
 
 The `GET /settings` and `PUT /settings` routes expose all non-secret settings (secret keys like `gitlab_token`, `api_token`, `distiller_api_key`, `langfuse_public_key`, and `langfuse_secret_key` are never returned and never editable via the UI). Secrets remain environment-only: the API returns only a `secret_present` boolean for each secret, allowing the UI to show which credentials are configured without exposing them.
