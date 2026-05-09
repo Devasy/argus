@@ -1,0 +1,28 @@
+[
+  {
+    "id": 2528,
+    "user": {
+      "id": 1079,
+      "username": "pr_agent",
+      "public_email": null,
+      "name": "pr_agent",
+      "state": "active",
+      "locked": false,
+      "avatar_url": "https://secure.gravatar.com/avatar/b18e74f332f33d889da39794f4f29cafaa47a113e8d1c933238ef4d9f26d0144?s=80&d=identicon",
+      "web_url": "https://gitlab.example.internal/pr_agent"
+    },
+    "created_at": "2026-06-15T13:15:47.629Z",
+    "resource_type": "MergeRequest",
+    "resource_id": 47536,
+    "label": {
+      "id": 2281,
+      "name": "Review effort 4/5",
+      "description": null,
+      "text_color": "#FFFFFF",
+      "description_html": "",
+      "color": "#6699cc",
+      "archived": false
+    },
+    "action": "add"
+  }
+]
