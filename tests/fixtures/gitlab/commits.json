@@ -1,0 +1,597 @@
+[
+  {
+    "id": "b42c7b0705a296e0203f88437c54e0498bded1b7",
+    "short_id": "b42c7b07",
+    "created_at": "2026-06-22T10:38:31.000+05:30",
+    "parent_ids": [
+      "76276748bb44dfc27688f4d73955351b0d30255d"
+    ],
+    "title": "update baseline",
+    "message": "update baseline\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-22T10:38:31.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-22T10:38:31.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/b42c7b0705a296e0203f88437c54e0498bded1b7"
+  },
+  {
+    "id": "76276748bb44dfc27688f4d73955351b0d30255d",
+    "short_id": "76276748",
+    "created_at": "2026-06-22T10:25:17.000+05:30",
+    "parent_ids": [
+      "861c512c16d5b3fd274ab371341bb5f5d73201fb",
+      "e7592d46ec3268b8cc413439bf6806b9caa797a5"
+    ],
+    "title": "Merge branch 'develop-7.0.0' of ssh://gitlab.example.internal:10449/acme-security-exchange-key-sec/acme-security-exchange into feature/ARG-99-Platform-logs-analyser",
+    "message": "Merge branch 'develop-7.0.0' of ssh://gitlab.example.internal:10449/acme-security-exchange-key-sec/acme-security-exchange into feature/ARG-99-Platform-logs-analyser\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-22T10:25:17.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-22T10:25:17.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/76276748bb44dfc27688f4d73955351b0d30255d"
+  },
+  {
+    "id": "861c512c16d5b3fd274ab371341bb5f5d73201fb",
+    "short_id": "861c512c",
+    "created_at": "2026-06-19T17:18:19.000+05:30",
+    "parent_ids": [
+      "800990b5d645d494c9466bda5d38d93e572e2255"
+    ],
+    "title": "Add platform logs analyzer under ai-copilot skill",
+    "message": "Add platform logs analyzer under ai-copilot skill\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-19T17:18:19.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-19T17:18:19.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/861c512c16d5b3fd274ab371341bb5f5d73201fb"
+  },
+  {
+    "id": "800990b5d645d494c9466bda5d38d93e572e2255",
+    "short_id": "800990b5",
+    "created_at": "2026-06-19T14:12:42.000+05:30",
+    "parent_ids": [
+      "452d18dd9198f14f8daafac050656c4db3423243"
+    ],
+    "title": "update baseline",
+    "message": "update baseline\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-19T14:12:42.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-19T14:12:42.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/800990b5d645d494c9466bda5d38d93e572e2255"
+  },
+  {
+    "id": "452d18dd9198f14f8daafac050656c4db3423243",
+    "short_id": "452d18dd",
+    "created_at": "2026-06-16T16:22:13.000+05:30",
+    "parent_ids": [
+      "12dee4e7dc77d80ffb1b5287a144c47dda96e695"
+    ],
+    "title": "instead of fire and forget, await explicitly, still does not guaranty the task cancellation.",
+    "message": "instead of fire and forget, await explicitly, still does not guaranty the task cancellation.\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-16T16:22:13.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-16T16:22:13.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/452d18dd9198f14f8daafac050656c4db3423243"
+  },
+  {
+    "id": "12dee4e7dc77d80ffb1b5287a144c47dda96e695",
+    "short_id": "12dee4e7",
+    "created_at": "2026-06-16T01:07:56.000+05:30",
+    "parent_ids": [
+      "ddd78b2fb65b67c7bd17057f76a101a0a2910545"
+    ],
+    "title": "pr comments",
+    "message": "pr comments\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-16T01:07:56.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-16T01:07:56.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/12dee4e7dc77d80ffb1b5287a144c47dda96e695"
+  },
+  {
+    "id": "ddd78b2fb65b67c7bd17057f76a101a0a2910545",
+    "short_id": "ddd78b2f",
+    "created_at": "2026-06-15T14:06:49.000+05:30",
+    "parent_ids": [
+      "3ecd00f46ccb1daa54df1bee98ccdfd94ccd143a"
+    ],
+    "title": "update log message, expose max_log_analyse as env var, remove pull pipeling mention from health category.",
+    "message": "update log message, expose max_log_analyse as env var, remove pull pipeling mention from health category.\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-15T14:06:49.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-15T14:06:49.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/ddd78b2fb65b67c7bd17057f76a101a0a2910545"
+  },
+  {
+    "id": "3ecd00f46ccb1daa54df1bee98ccdfd94ccd143a",
+    "short_id": "3ecd00f4",
+    "created_at": "2026-06-12T11:38:20.000+05:30",
+    "parent_ids": [
+      "70b75b0dd8bcbedbc9ff80bf76c746e6e9e86c48"
+    ],
+    "title": "dynamic fields for effort and model",
+    "message": "dynamic fields for effort and model\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-12T11:38:20.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-12T11:38:20.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/3ecd00f46ccb1daa54df1bee98ccdfd94ccd143a"
+  },
+  {
+    "id": "70b75b0dd8bcbedbc9ff80bf76c746e6e9e86c48",
+    "short_id": "70b75b0d",
+    "created_at": "2026-06-12T09:28:28.000+05:30",
+    "parent_ids": [
+      "271e8098e062de35d07f7ec11f46d0d271cd983a"
+    ],
+    "title": "update tests",
+    "message": "update tests\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-12T09:28:28.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-12T09:28:28.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/70b75b0dd8bcbedbc9ff80bf76c746e6e9e86c48"
+  },
+  {
+    "id": "271e8098e062de35d07f7ec11f46d0d271cd983a",
+    "short_id": "271e8098",
+    "created_at": "2026-06-12T00:42:06.000+05:30",
+    "parent_ids": [
+      "865ef570ccf2792cc5066c7f79faadbb79ee7782"
+    ],
+    "title": "add try catch for tools",
+    "message": "add try catch for tools\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-12T00:42:06.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-12T00:42:06.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/271e8098e062de35d07f7ec11f46d0d271cd983a"
+  },
+  {
+    "id": "865ef570ccf2792cc5066c7f79faadbb79ee7782",
+    "short_id": "865ef570",
+    "created_at": "2026-06-12T00:19:12.000+05:30",
+    "parent_ids": [
+      "7976891e91196297fe26c0298d7076929b2e16a7"
+    ],
+    "title": "update the model and add prompt guard",
+    "message": "update the model and add prompt guard\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-12T00:19:12.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-12T00:19:12.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/865ef570ccf2792cc5066c7f79faadbb79ee7782"
+  },
+  {
+    "id": "7976891e91196297fe26c0298d7076929b2e16a7",
+    "short_id": "7976891e",
+    "created_at": "2026-06-11T17:30:02.000+05:30",
+    "parent_ids": [
+      "13fc34848fc5162a97d0333f418e03094516e9f2",
+      "3ba50245022cddb5aa4abe0edc45563332a32bb0"
+    ],
+    "title": "Merge branch 'develop-7.0.0' of ssh://gitlab.example.internal:10449/acme-security-exchange-key-sec/acme-security-exchange into feature/ARG-99-Platform-logs-analyser",
+    "message": "Merge branch 'develop-7.0.0' of ssh://gitlab.example.internal:10449/acme-security-exchange-key-sec/acme-security-exchange into feature/ARG-99-Platform-logs-analyser\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-11T17:30:02.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-11T17:30:02.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/7976891e91196297fe26c0298d7076929b2e16a7"
+  },
+  {
+    "id": "13fc34848fc5162a97d0333f418e03094516e9f2",
+    "short_id": "13fc3484",
+    "created_at": "2026-06-11T17:29:07.000+05:30",
+    "parent_ids": [
+      "9ff7219b29333acbd327be67feacdfb4ab06783f"
+    ],
+    "title": "remove debug logs",
+    "message": "remove debug logs\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-11T17:29:07.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-11T17:29:07.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/13fc34848fc5162a97d0333f418e03094516e9f2"
+  },
+  {
+    "id": "9ff7219b29333acbd327be67feacdfb4ab06783f",
+    "short_id": "9ff7219b",
+    "created_at": "2026-06-11T17:27:16.000+05:30",
+    "parent_ids": [
+      "8b919a00ef44ea5ac9bc959bd555cfbe9f4be4fe"
+    ],
+    "title": "add citation handler,",
+    "message": "add citation handler,\nupdate prompts for citations,\nadd debug log for generated analysis message\nintroduce llmprovidererror type mask it with jsonresponse on exception handler.\nadd prefixedlogger and use it to stream pre-fixed logs.\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-11T17:27:16.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-11T17:27:16.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/9ff7219b29333acbd327be67feacdfb4ab06783f"
+  },
+  {
+    "id": "8b919a00ef44ea5ac9bc959bd555cfbe9f4be4fe",
+    "short_id": "8b919a00",
+    "created_at": "2026-06-09T17:00:31.000+05:30",
+    "parent_ids": [
+      "9e7a4f928a436d27277260bec4d21aa5d26f2e4f",
+      "c2f58a6f29cd0b6035f07e2de2994c223271ccc9"
+    ],
+    "title": "Merge branch 'develop-7.0.0' of ssh://gitlab.example.internal:10449/acme-security-exchange-key-sec/acme-security-exchange into feature/ARG-99-Platform-logs-analyser",
+    "message": "Merge branch 'develop-7.0.0' of ssh://gitlab.example.internal:10449/acme-security-exchange-key-sec/acme-security-exchange into feature/ARG-99-Platform-logs-analyser\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-09T17:00:31.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-09T17:00:31.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/8b919a00ef44ea5ac9bc959bd555cfbe9f4be4fe"
+  },
+  {
+    "id": "9e7a4f928a436d27277260bec4d21aa5d26f2e4f",
+    "short_id": "9e7a4f92",
+    "created_at": "2026-06-09T16:51:19.000+05:30",
+    "parent_ids": [
+      "9bd12dc67f3019750aa435131b72bcc5cbf94316"
+    ],
+    "title": "revert dynamic model",
+    "message": "revert dynamic model\nhandle client disconnect\nupdate llm tracking\nsupply label for ai feature form backend\ndebug logs\nupdate system prompt\nupdate logs endpoint, add utils\nexpose analyze endpoint for every error irrespective of the error code being present or not.\nremove custom retry mechanism, defer to runnable set retry mechanism.\nexpose effor level\nre-factor tools from the routes for agents\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-09T16:51:19.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-09T16:51:19.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/9e7a4f928a436d27277260bec4d21aa5d26f2e4f"
+  },
+  {
+    "id": "9bd12dc67f3019750aa435131b72bcc5cbf94316",
+    "short_id": "9bd12dc6",
+    "created_at": "2026-06-02T12:49:31.000+05:30",
+    "parent_ids": [
+      "4146e2402cf8c4fcc3bc17eb1b6f842612f71dd0"
+    ],
+    "title": "Triage agent with create react agent",
+    "message": "Triage agent with create react agent\nadded tools for log analysis\nadded 2 new requirements langchain and langgraph\nkeeping the existing analyze endpoint intact for now.\nupdate the tests\nupdate llm provider plugin base to add get_web_search_tool.\nadd models for platform analyser feature.\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-06-02T12:49:31.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-06-02T12:49:31.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/9bd12dc67f3019750aa435131b72bcc5cbf94316"
+  },
+  {
+    "id": "4146e2402cf8c4fcc3bc17eb1b6f842612f71dd0",
+    "short_id": "4146e240",
+    "created_at": "2026-05-26T15:03:27.000+05:30",
+    "parent_ids": [
+      "744be8b81227343036767c1e6a02e50b48b8bcf4",
+      "132c55de42451deddb78865668e0591518a92fe3"
+    ],
+    "title": "Merge branch 'develop-7.0.0' of ssh://gitlab.example.internal:10449/acme-security-exchange-key-sec/acme-security-exchange into feature/poc-ai-copilot",
+    "message": "Merge branch 'develop-7.0.0' of ssh://gitlab.example.internal:10449/acme-security-exchange-key-sec/acme-security-exchange into feature/poc-ai-copilot\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-05-26T15:03:27.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-05-26T15:03:27.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/4146e2402cf8c4fcc3bc17eb1b6f842612f71dd0"
+  },
+  {
+    "id": "744be8b81227343036767c1e6a02e50b48b8bcf4",
+    "short_id": "744be8b8",
+    "created_at": "2026-05-26T14:54:34.000+05:30",
+    "parent_ids": [
+      "e6ea7fd787ec8067babbcba64685c5f852939614"
+    ],
+    "title": "move ai feature models under ai-copilot",
+    "message": "move ai feature models under ai-copilot\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-05-26T14:54:34.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-05-26T14:54:34.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/744be8b81227343036767c1e6a02e50b48b8bcf4"
+  },
+  {
+    "id": "e6ea7fd787ec8067babbcba64685c5f852939614",
+    "short_id": "e6ea7fd7",
+    "created_at": "2026-05-26T14:35:25.000+05:30",
+    "parent_ids": [
+      "07f76999017292e3c594dac41e44752d3d6fbb5f"
+    ],
+    "title": "update langchain-core to 1.4.0",
+    "message": "update langchain-core to 1.4.0\nadd tests for routes\nmove ai functionality related routes under ai-copilot\nthread through ssl_validation\nuse delete_configuration hook while deleting plugin.\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-05-26T14:35:25.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-05-26T14:35:25.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/e6ea7fd787ec8067babbcba64685c5f852939614"
+  },
+  {
+    "id": "07f76999017292e3c594dac41e44752d3d6fbb5f",
+    "short_id": "07f76999",
+    "created_at": "2026-05-21T17:43:08.000+05:30",
+    "parent_ids": [
+      "a3d45e75516c7477e7f7728c6e4d3b8537b239a0"
+    ],
+    "title": "update dashboard pipeline",
+    "message": "update dashboard pipeline\nupdate analyze to limit till max field bytes\nretain the plugin checks rather then deactivating\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-05-21T17:43:08.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-05-21T17:43:08.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/07f76999017292e3c594dac41e44752d3d6fbb5f"
+  },
+  {
+    "id": "a3d45e75516c7477e7f7728c6e4d3b8537b239a0",
+    "short_id": "a3d45e75",
+    "created_at": "2026-05-21T16:06:56.000+05:30",
+    "parent_ids": [
+      "5a1b4228b71062a1b30758c3f4792fcf7437f71f"
+    ],
+    "title": "use datetime and utc",
+    "message": "use datetime and utc\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-05-21T16:06:56.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-05-21T16:06:56.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/a3d45e75516c7477e7f7728c6e4d3b8537b239a0"
+  },
+  {
+    "id": "5a1b4228b71062a1b30758c3f4792fcf7437f71f",
+    "short_id": "5a1b4228",
+    "created_at": "2026-05-21T16:06:42.000+05:30",
+    "parent_ids": [
+      "a3d291587e40cb79545cb41e69e33a1daa7e6351"
+    ],
+    "title": "- move langchain-anthropic to plugin lib",
+    "message": "- move langchain-anthropic to plugin lib\n- remove list llm provider permissions aligning with tenants\n- add indexes for the user and feature for ai usage table in migration\n- move classify error logic to plugin base allowing - llm providers to decide when to retry or not.\n- use dataclas and enums for the llm error types and llmerrorresponse.\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-05-21T16:06:42.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-05-21T16:06:42.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/5a1b4228b71062a1b30758c3f4792fcf7437f71f"
+  },
+  {
+    "id": "a3d291587e40cb79545cb41e69e33a1daa7e6351",
+    "short_id": "a3d29158",
+    "created_at": "2026-05-19T18:13:34.000+05:30",
+    "parent_ids": [
+      "f5de95058dc1065a265f21eb37265dc860ff6bfb",
+      "9f0502d844798eefc1883b9c40c91b5dfed1431e"
+    ],
+    "title": "Merge branch 'develop-7.0.0' of ssh://gitlab.example.internal:10449/acme-security-exchange-key-sec/acme-security-exchange into feature/poc-ai-copilot",
+    "message": "Merge branch 'develop-7.0.0' of ssh://gitlab.example.internal:10449/acme-security-exchange-key-sec/acme-security-exchange into feature/poc-ai-copilot\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-05-19T18:13:34.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-05-19T18:13:34.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/a3d291587e40cb79545cb41e69e33a1daa7e6351"
+  },
+  {
+    "id": "f5de95058dc1065a265f21eb37265dc860ff6bfb",
+    "short_id": "f5de9505",
+    "created_at": "2026-05-19T18:09:49.000+05:30",
+    "parent_ids": [
+      "b3a79b5c8f4d8f519cb4a6ccd1c3b640b4030071"
+    ],
+    "title": "Add dashboard for ai usage",
+    "message": "Add dashboard for ai usage\nadd common utility to track and report ai usage\nadd ai roles, ai_read, and ai_write\nadd migration for the ai roles\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-05-19T18:09:49.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-05-19T18:09:49.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/f5de95058dc1065a265f21eb37265dc860ff6bfb"
+  },
+  {
+    "id": "b3a79b5c8f4d8f519cb4a6ccd1c3b640b4030071",
+    "short_id": "b3a79b5c",
+    "created_at": "2026-05-15T14:15:44.000+05:30",
+    "parent_ids": [
+      "22cf255ea351181613e9095718d9cceb0e48c8d0"
+    ],
+    "title": "add llm provider plugin end to end",
+    "message": "add llm provider plugin end to end\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-05-15T14:15:44.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-05-15T14:15:44.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/b3a79b5c8f4d8f519cb4a6ccd1c3b640b4030071"
+  },
+  {
+    "id": "22cf255ea351181613e9095718d9cceb0e48c8d0",
+    "short_id": "22cf255e",
+    "created_at": "2026-05-13T16:45:10.000+05:30",
+    "parent_ids": [
+      "daff3aea55f4633703d23a9fb442fef210ec21c5",
+      "9eec2049c94541265324e882b95d627992654671"
+    ],
+    "title": "Merge branch 'develop-7.0.0' of ssh://gitlab.example.internal:10449/acme-security-exchange-key-sec/acme-security-exchange into feature/poc-ai-copilot",
+    "message": "Merge branch 'develop-7.0.0' of ssh://gitlab.example.internal:10449/acme-security-exchange-key-sec/acme-security-exchange into feature/poc-ai-copilot\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-05-13T16:45:10.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-05-13T16:45:10.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/22cf255ea351181613e9095718d9cceb0e48c8d0"
+  },
+  {
+    "id": "daff3aea55f4633703d23a9fb442fef210ec21c5",
+    "short_id": "daff3aea",
+    "created_at": "2026-04-27T14:37:28.000+05:30",
+    "parent_ids": [
+      "32568c6f2f0251f2fa05df7f0764ff77d21ce5c4"
+    ],
+    "title": "changes for platform log analyser",
+    "message": "changes for platform log analyser\n",
+    "author_name": "Developer One",
+    "author_email": "developer.one@example.com",
+    "authored_date": "2026-04-27T14:37:28.000+05:30",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-04-27T14:37:28.000+05:30",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/daff3aea55f4633703d23a9fb442fef210ec21c5"
+  },
+  {
+    "id": "32568c6f2f0251f2fa05df7f0764ff77d21ce5c4",
+    "short_id": "32568c6f",
+    "created_at": "2026-04-10T12:18:34.000+00:00",
+    "parent_ids": [
+      "ac814d3d0848422cafd785a78fcc286ce4162b21"
+    ],
+    "title": "Merged in bugfix/ARG-27944-Fix-normalization-issue-after-action-performed (pull request #2485)",
+    "message": "Merged in bugfix/ARG-27944-Fix-normalization-issue-after-action-performed (pull request #2485)\n\nNCTE-27944: Update _get_normalized_field_value to handle configuration object attributes and improve type flexibility\n\n* ARG-27944: Update _get_normalized_field_value to handle configuration object attributes and improve type flexibility\n\n* ARG-27944: simplify _get_normalized_field_value signature and remove redundant configuration attribute checks\n\n* ARG-27944: standardize configuration variable usage by replacing redundant configuration references with configuration_db\n\n\nApproved-by: Developer Two\nApproved-by: Developer One\n",
+    "author_name": "Dev Y",
+    "author_email": "dev.y@example.com",
+    "authored_date": "2026-04-10T12:18:34.000+00:00",
+    "committer_name": "Developer Two",
+    "committer_email": "developer.two@example.com",
+    "committed_date": "2026-04-10T12:18:34.000+00:00",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/32568c6f2f0251f2fa05df7f0764ff77d21ce5c4"
+  },
+  {
+    "id": "ac814d3d0848422cafd785a78fcc286ce4162b21",
+    "short_id": "ac814d3d",
+    "created_at": "2026-04-09T06:07:03.000+00:00",
+    "parent_ids": [
+      "2fbe881cf3260464e9d54a537c1b38c004c4a2d6"
+    ],
+    "title": "Merged in bugfix/27941-data_mgr-migration-fix (pull request #2484)",
+    "message": "Merged in bugfix/27941-data_mgr-migration-fix (pull request #2484)\n\nNCTE-27941: updated the `update_config` call with the user info and updated the loggers to align with previour version behaviours\n\n* updated the `update_config` call with the user info and updated the loggers to align with previour version behaviours\n\n\nApproved-by: Developer Two\nApproved-by: Developer One\n",
+    "author_name": "Lead Dev",
+    "author_email": "lead.dev@example.com",
+    "authored_date": "2026-04-09T06:07:03.000+00:00",
+    "committer_name": "Developer One",
+    "committer_email": "developer.one@example.com",
+    "committed_date": "2026-04-09T06:07:03.000+00:00",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/ac814d3d0848422cafd785a78fcc286ce4162b21"
+  },
+  {
+    "id": "2fbe881cf3260464e9d54a537c1b38c004c4a2d6",
+    "short_id": "2fbe881c",
+    "created_at": "2026-04-02T09:11:15.000+00:00",
+    "parent_ids": [
+      "43e00449c6ca2e97f42997355d3743928f683cd7"
+    ],
+    "title": "Merged in ARG-27879-mongo-update (pull request #2482)",
+    "message": "Merged in ARG-27879-mongo-update (pull request #2482)\n\nUpdated mongodb version\n\n* Updated mongodb version\n\n\nApproved-by: Developer Two\n",
+    "author_name": "Senior Engineer",
+    "author_email": "senior.engineer@example.com",
+    "authored_date": "2026-04-02T09:11:15.000+00:00",
+    "committer_name": "Developer Two",
+    "committer_email": "developer.two@example.com",
+    "committed_date": "2026-04-02T09:11:15.000+00:00",
+    "trailers": {},
+    "extended_trailers": {},
+    "web_url": "https://gitlab.example.internal/acme-security-exchange-key-sec/acme-security-exchange/-/commit/2fbe881cf3260464e9d54a537c1b38c004c4a2d6"
+  }
+]

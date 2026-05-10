@@ -1,0 +1,42 @@
+[
+  {
+    "id": 342,
+    "username": "developer.one",
+    "public_email": null,
+    "name": "Developer One",
+    "state": "active",
+    "locked": false,
+    "avatar_url": "https://secure.gravatar.com/avatar/d9da6286a27b195c19450259acbb16a6bbaa20a5b9c33cd82de9310e31279580?s=80&d=identicon",
+    "web_url": "https://gitlab.example.internal/developer.one"
+  },
+  {
+    "id": 1079,
+    "username": "pr_agent",
+    "public_email": null,
+    "name": "pr_agent",
+    "state": "active",
+    "locked": false,
+    "avatar_url": "https://secure.gravatar.com/avatar/b18e74f332f33d889da39794f4f29cafaa47a113e8d1c933238ef4d9f26d0144?s=80&d=identicon",
+    "web_url": "https://gitlab.example.internal/pr_agent"
+  },
+  {
+    "id": 1023,
+    "username": "senior.engineer",
+    "public_email": null,
+    "name": "Senior Engineer",
+    "state": "active",
+    "locked": false,
+    "avatar_url": "https://secure.gravatar.com/avatar/65874eadc9cafe305459096d9c60d0b7f587bf4c72ae8ccceb569ec0988ff8ff?s=80&d=identicon",
+    "web_url": "https://gitlab.example.internal/senior.engineer"
+  },
+  {
+    "id": 758,
+    "username": "developer.two",
+    "public_email": null,
+    "name": "Developer Two",
+    "state": "active",
+    "locked": false,
+    "avatar_url": "https://secure.gravatar.com/avatar/e35998ef259b3670b0de3b417e86e0b095b55655889c4af6d621b77cea7bd2c0?s=80&d=identicon",
+    "web_url": "https://gitlab.example.internal/developer.two"
+  }
+]

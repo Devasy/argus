@@ -1,0 +1,53 @@
+{
+  "id": 47536,
+  "iid": 36,
+  "project_id": 848,
+  "title": "[ARG-99][AI Copilot] - Platform Logs Analyzer",
+  "description": "- Adds Platform logs analyzer.",
+  "state": "merged",
+  "created_at": "2026-06-11T12:02:37.907Z",
+  "updated_at": "2026-06-22T05:13:13.466Z",
+  "merge_status": "can_be_merged",
+  "approved": true,
+  "approvals_required": 0,
+  "approvals_left": 0,
+  "require_password_to_approve": false,
+  "approved_by": [
+    {
+      "user": {
+        "id": 758,
+        "username": "developer.two",
+        "public_email": null,
+        "name": "Developer Two",
+        "state": "active",
+        "locked": false,
+        "avatar_url": "https://secure.gravatar.com/avatar/e35998ef259b3670b0de3b417e86e0b095b55655889c4af6d621b77cea7bd2c0?s=80&d=identicon",
+        "web_url": "https://gitlab.example.internal/developer.two"
+      },
+      "approved_at": "2026-06-16T03:20:08.657Z"
+    },
+    {
+      "user": {
+        "id": 1023,
+        "username": "senior.engineer",
+        "public_email": null,
+        "name": "Senior Engineer",
+        "state": "active",
+        "locked": false,
+        "avatar_url": "https://secure.gravatar.com/avatar/65874eadc9cafe305459096d9c60d0b7f587bf4c72ae8ccceb569ec0988ff8ff?s=80&d=identicon",
+        "web_url": "https://gitlab.example.internal/senior.engineer"
+      },
+      "approved_at": "2026-06-16T06:05:18.161Z"
+    }
+  ],
+  "suggested_approvers": [],
+  "approvers": [],
+  "approver_groups": [],
+  "user_has_approved": false,
+  "user_can_approve": true,
+  "approval_rules_left": [],
+  "has_approval_rules": false,
+  "merge_request_approvers_available": false,
+  "multiple_approval_rules_available": false,
+  "invalid_approvers_rules": []
+}
