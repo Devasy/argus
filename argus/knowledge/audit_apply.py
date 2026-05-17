@@ -129,7 +129,7 @@ async def apply_verdict(session: AsyncSession, verdict: AuditVerdict, *,
             changed = True
     elif verdict.proposed_action == "merge" and verdict.related_learning_id:
         survivor = await session.get(Learning, verdict.related_learning_id)
-        if survivor is not None and learning.id != survivor.id:
+        if survivor is not None and learning.id != survivor.id and survivor.repo_id == learning.repo_id:
             # Fold evidence into the survivor so the merge does not throw away
             # the duplicate's accumulated verdicts.
             survivor.hit_count += learning.hit_count

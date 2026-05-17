@@ -30,6 +30,14 @@ from argus.llm.langfuse_run import LangfuseRun
 
 logger = logging.getLogger("argus.auditor")
 
+def _safe_uuid(val: str | None) -> uuid.UUID | None:
+    if not val:
+        return None
+    try:
+        return uuid.UUID(str(val).strip())
+    except (ValueError, TypeError, AttributeError):
+        return None
+
 VERDICTS = ("corroborated", "stale", "contradicted", "unfalsifiable",
             "duplicate_of", "conflicts_with", "ungrounded")
 ACTIONS = ("none", "archive", "merge", "flag_for_rewrite", "escalate_to_human")
@@ -409,8 +417,7 @@ async def run_audit_for_repo(sf: async_sessionmaker, settings: Settings, gitlab,
                         verdict=v.verdict, confidence=v.confidence,
                         rationale=v.rationale,
                         citations=[c.model_dump() for c in v.citations],
-                        related_learning_id=(uuid.UUID(v.related_learning_id)
-                                             if v.related_learning_id else None),
+                        related_learning_id=_safe_uuid(v.related_learning_id),
                         proposed_action=action, suggested_hint_text=suggested,
                         state=initial_state_for(action)))
                     learning = await s.get(Learning, uuid.UUID(v.learning_id))

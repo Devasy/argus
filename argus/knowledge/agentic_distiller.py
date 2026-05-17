@@ -26,14 +26,27 @@ from argus.knowledge.graphify import build_graph, build_graphify_tool
 from argus.llm.config import LLMConfig
 from argus.llm.factory import build_chat_model
 from argus.llm.langfuse_run import LangfuseRun
-from argus.review import stages
 from argus.review.diffsvc import parse_diffs
-from argus.review.tools import (ToolContext, build_file_knowledge_tool,
+
+# Forward-compatible imports: argus.review pipeline stages arrive in Stage 6
+try:
+    from argus.review import stages
+    from argus.review.tools import (ToolContext, build_file_knowledge_tool,
                                     build_learnings_search_tool,
                                     build_learnings_upsert_tool,
                                     build_read_tools, build_skill_tools,
                                     discover_module_skills)
-from argus.review.workspace import WorkspaceManager
+    from argus.review.workspace import WorkspaceManager
+except ImportError:
+    stages = None  # type: ignore
+    ToolContext = None  # type: ignore
+    build_file_knowledge_tool = None  # type: ignore
+    build_learnings_search_tool = None  # type: ignore
+    build_learnings_upsert_tool = None  # type: ignore
+    build_read_tools = None  # type: ignore
+    build_skill_tools = None  # type: ignore
+    discover_module_skills = None  # type: ignore
+    WorkspaceManager = None  # type: ignore
 
 logger = logging.getLogger("argus.agentic_distiller")
 
@@ -133,6 +146,10 @@ async def run_agentic_distillation_for_mr(
             if row is not None:
                 row.langfuse_trace_id = langfuse_run.trace_id
                 await s.commit()
+
+    if WorkspaceManager is None or stages is None or ToolContext is None:
+        logger.warning('argus.review pipeline modules scheduled for Stage 6; skipping distillation in this revision')
+        return DistillationResult(entries=[])
 
     diffs = await gitlab.list_diffs(repo.gitlab_project_id, mr.mr_iid)
     files, hunks = parse_diffs(diffs)

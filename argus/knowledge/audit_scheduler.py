@@ -60,7 +60,10 @@ async def run_audit_forever(sf, settings, client_factory, llm_cfg,
                         sf, settings, client, repo, llm_cfg,
                         max_clusters=settings.audit_max_clusters,
                         audit_run_id=run_id)
-                    status, error = "done", None
+                    if isinstance(result, dict) and result.get('status') == 'failed':
+                        status, error = 'failed', result.get('error') or 'Audit run returned failure'
+                    else:
+                        status, error = 'done', None
                 except Exception as e:
                     logger.exception("audit run failed for repo %s", repo.id)
                     result, status, error = {}, "failed", str(e)[:2000]
