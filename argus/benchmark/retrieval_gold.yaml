@@ -1,0 +1,157 @@
+# Manual relevance gold standard for learning retrieval, judged 2026-09-09.
+#
+# Why this exists: retrieval quality could only be scored against outcome
+# labels (12 `hit` events in ~9,200 injections), which the review-quality
+# ledger already called too sparse to read -- AUC 0.564, indistinguishable
+# from chance. This file replaces that with a direct judgement: for each
+# benchmark MR, which learnings in the candidate pool a competent reviewer
+# would actually want in front of them.
+#
+# Judging rule, applied per (MR, learning) pair against the MR's real diff:
+#   strong -- bears on something this diff actually does, and holding it in
+#             mind would plausibly change a verdict (catch a real defect, or
+#             correctly refrain from raising a false one).
+#   weak   -- same subsystem or technology and plausibly applicable, but does
+#             not bear on anything the diff specifically does.
+# Everything else in the pool is unjudged and counts as not relevant.
+#
+# `strong` is the scoring target. `weak` is recorded so a change that trades
+# a weak hit for a strong one is visible rather than looking like noise.
+#
+# Pools are the active kind="guidance" learnings that existed for that repo
+# at 2026-09-09 05:39 UTC (the first scored run): 24 for docker-compose, 54
+# for -ui, 132 for acme-security-exchange. There were no global
+# (repo_id IS NULL) guidance learnings at that time.
+#
+# Ids are 8-char prefixes, the same form the agent sees and cites.
+
+merge_requests:
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange-docker-compose
+    mr_iid: 12
+    pool_size: 24
+    note: >
+      New standalone ce_healthcheck script plus ~850 lines of healthcheck job
+      orchestration in management_server.py, checks_manifest.json edits. Large
+      surface, so an unusually large share of this small pool is genuinely
+      relevant.
+    strong:
+      - id: e1d79ef3   # Require critical fields in schema validation to prevent silent passes
+        why: >
+          Names `needle` for file_contains, `flag` for cpu_flag, `pattern` for
+          command_matches verbatim. This is the distilled form of the golden
+          set's only bot_right item (mr12-shell-injection). Never retrieved.
+      - id: 9176cf39   # Validate gate/filter conditions against a known domain
+      - id: 430ab89c   # Bump manifest_version when modifying checks_manifest.json
+      - id: b82ec3f1   # Don't ship development version markers in release manifests
+      - id: a5e449bf   # Version new standalone scripts from 1.0.0
+      - id: 5ce9d568   # Apply stale-state recovery on every job-fetch path
+      - id: 3ba461a9   # Detect orphaned jobs by in-memory presence, not stored PID
+      - id: 64e2de3e   # Server-side validation of shell-interpolated values
+      - id: cbf721a8   # Single source of truth for HA/SA environment detection
+    weak: [10758fb9, e129de89, 93a2a9b6, ffaf518c, c4eded02, 5e2f1db9, 39fdcbee,
+           b39800f4, b065c7c6, 4cadffde, 9c3659f4]
+
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange-ui
+    mr_iid: 32
+    pool_size: 54
+    note: generateAlert toggle across CteSetting/Sharing/SharingForm, new constants.js.
+    strong:
+      - id: 204b1fb3   # Avoid hardcoding backend constants in frontend
+        why: >
+          Its own worked example is literally CTE_NO_ACTION_VALUE =
+          "ce_reserved_no_action", the exact constant this MR's new
+          constants.js defines. Never retrieved.
+      - id: cb7fc74d   # Edit mode form defaults must match global defaults
+        why: >
+          "use props.data.field ?? globalDefault instead of ?? hardcodedFalse"
+          is close to a restatement of the adjudicated bug for this MR
+          (mr32-generatealert-default). Never retrieved.
+      - id: 4da0e0c1   # Trust form component values over re-reading from original config
+        why: Names SharingForm and generateAlert by name. Never retrieved.
+      - id: 170e715f   # Verify all code paths include new fields when constructing objects
+        why: >
+          Its bug example (newField present in one construction path, missing
+          in another) is the shape of the CRE-entity-path omission the first
+          dry run actually found. Never retrieved.
+      - id: b3002163   # When API does full-replace PATCH, client must send all fields
+      - id: 6b0e3356   # Gate duplicate checks on ALL uniqueness-defining fields
+    weak: [002e07ce, 9bd82bf0, 461201be, 7012c479, 3c4fa3b7, bf01af61, a90744c9, 9aca064e]
+
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 41
+    pool_size: 132
+    note: >
+      "No Action" pseudo-target for threat_intel sharing, generateAlert on the Action
+      model, global alert kill-switch, store_cte_alerts Celery task, dynamic
+      alert field registration, validate_result_and_update returns a 4-tuple.
+    strong:
+      - id: 90b5d5cf   # Namespaced reserved values to avoid plugin collisions
+        why: ce_reserved_no_action is exactly a namespaced reserved value.
+      - id: 2fd03cb1   # New enum values must have corresponding code paths
+      - id: 36035f7d   # Verify return type annotations match all code paths
+        why: >
+          validate_result_and_update's signature changed to a 4-tuple; the
+          original real review flagged exactly this. Never retrieved.
+      - id: c3ee374c   # Simplified validation logic may miss legacy code paths
+      - id: 3ee0daac   # Trace full downstream flow before modifying validation logic
+      - id: e54441df   # Return None when module is disabled to prevent vacuous success
+      - id: 587e8686   # Track and report silently dropped mappings
+      - id: b119c41c   # Check LLM-proposed new field names for type collision
+      - id: c58a0750   # Avoid duplicate string constants across modules
+      - id: 5b05dd86   # Use _check_beat_lock/is_due for Celery beat-leader tasks
+    weak: [730f5ae9, 1bf5038f, 71a42e6f, 558929fb, 0d499230, 4050d63d]
+
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 60
+    pool_size: 132
+    note: Cross-type sharing validation between sharedWith and creShare.
+    strong:
+      - id: cc964a5a   # Use (previous or {}) pattern for validators handling create and update
+        why: >
+          MR !60's own first real review found "validate_sharedWith crashes on
+          rule creation when previous is None" -- this learning is that finding
+          distilled. Never retrieved for the MR it came from.
+      - id: 0c6ea346   # DB update queries must include all unique identifiers
+      - id: 3ee0daac   # Trace full downstream flow before modifying validation logic
+      - id: e31e8b74   # Verify all conditional branches have consistent validation checks
+      - id: c3ee374c   # Simplified validation logic may miss legacy code paths
+      - id: 4b18946e   # Handle dependent field validation failures in Pydantic field_validators
+    weak: [71a42e6f, e822fa73, 30d2ac0b, b279c40f, a349f0d2]
+
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 61
+    pool_size: 132
+    note: Entity immutability for business rules in rules_v2 and threat_intel.
+    strong:
+      - id: 0da3377b   # Gate "immutable once set" on completeness, not mere presence
+      - id: 2a9a640b   # DB existence checks should return 404, not Pydantic 422
+      - id: 3ee0daac   # Trace full downstream flow before modifying validation logic
+      - id: e31e8b74   # Verify all conditional branches have consistent validation checks
+      - id: 4b18946e   # Handle dependent field validation failures in Pydantic field_validators
+      - id: c3ee374c   # Simplified validation logic may miss legacy code paths
+    weak: [71a42e6f, 36035f7d, cc964a5a]
+
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange-ui
+    mr_iid: 49
+    pool_size: 54
+    note: Modal focus trap (enforceFocus=false) and a React StrictMode isMountedRef double-invoke fix.
+    strong:
+      - id: 23cba962   # Custom hooks with internal closures: verify captured values are in deps
+      - id: 596b33cd   # useEffect must include all derived values read in its body
+      - id: 2af903a8   # eslint-disable exhaustive-deps can hide real missing dependencies
+      - id: b634c863   # Use ref to avoid unnecessary re-renders
+    weak: [663a9fe6, 9aca064e, 461201be]
+
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange-ui
+    mr_iid: 53
+    pool_size: 54
+    note: >
+      npm upgrades (react-color to @uiw/react-color, querystring-es3 to
+      URLSearchParams), Endor Labs CI container scanning. The pool has thin
+      coverage of CI/dependency topics, so the relevant set is genuinely small
+      -- a low score here is a corpus gap, not only a retrieval one.
+    strong:
+      - id: 20fc8f01   # Normalize HSL color values before HSL-to-RGB conversion
+      - id: f2b487ae   # Remove unused imports
+      - id: c8ff50c1   # Maintain consistent job-level gating variables across CI/CD pipelines
+    weak: [761d4a59, 4f28eb13]
