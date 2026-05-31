@@ -1,0 +1,187 @@
+# Golden set for benchmarking argus across models and prompt changes.
+#
+# mr_iid is NOT unique -- MR 12 exists in six repositories with unrelated
+# titles -- so every entry is keyed by (project_path, mr_iid). Getting this
+# wrong silently benchmarks a different merge request.
+#
+# Rationale and evidence for each adjudicated item:
+#   docs/superpowers/specs/2026-09-08-golden-set-ground-truth.md
+version: 1
+
+merge_requests:
+  # --- scored: adjudicated ground truth exists ---------------------------
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange-docker-compose
+    mr_iid: 12
+    title: CE HealthCheck Script
+    scored: true
+    note: >
+      The best single item in the set: 19 comments with both accepted and
+      rejected outcomes on one MR, so it controls for reviewer, codebase and
+      diff.
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange-ui
+    mr_iid: 32
+    title: Adds Notifier flow for threat_intel
+    scored: true
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 41
+    title: Adds threat_intel notifiers tasks flow
+    scored: true
+    note: 13 comments, all rejected by the human.
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange-ui
+    mr_iid: 49
+    title: "ARG-262: Update focus of Upgrade modal"
+    scored: true
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange-ui
+    mr_iid: 53
+    title: "NCTE 264: Upgrade deprecated packages"
+    scored: true
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 60
+    title: "ARG-222: Implement sharing entry validation"
+    scored: true
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 61
+    title: "ARG-229: Implement entity immutability"
+    scored: true
+
+  # --- behavioural only: no ground truth, compare runs against each other -
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange-ui
+    mr_iid: 39
+    title: "[ARG-182] CRE automapper feature"
+    scored: false
+    note: 18 comments, 8 dismissed, only 2 accepted.
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 58
+    title: Updates the validation error message
+    scored: false
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 59
+    title: "[ARG-182] CRE automapper feature"
+    scored: false
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 63
+    title: "ARG-225: Support normalized field in value"
+    scored: false
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 70
+    title: "[ARG-187] saving field labels per action"
+    scored: false
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 80
+    title: AI Copilot
+    scored: false
+    note: 23 comments, 17 never touched. The volume/fatigue case.
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 104
+    title: "[ARG-351] Bundle un-documented Features"
+    scored: false
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 113
+    title: "ARG-338: Add data type field validation"
+    scored: false
+  - project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 131
+    title: "ARG-335: Fix lockedAt field in ticket_sync migration"
+    scored: false
+    note: 5 comments, 4 accepted. A high-acceptance control.
+
+# verdict values:
+#   human_right         adjudicated FALSE -- raising it again is a regression
+#   bot_right           adjudicated TRUE  -- failing to raise it is a miss
+#   bot_right_trivial   true but not worth saying -- neutral, counted as noise
+items:
+  - id: mr41-no-action-flag
+    project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 41
+    file: acme/integrations/threat_intel/models/business_rule.py
+    line: 185
+    verdict: human_right
+    claim: "Breaking validation change: existing 'No Action' rules become invalid"
+    why: CTE_NO_ACTION_VALUE is introduced in this same commit, so no pre-existing rule could hold it.
+
+  - id: mr41-threat_intel-ticket_sync-import
+    project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 41
+    file: acme/integrations/threat_intel/tasks/share_indicators.py
+    line: 29
+    verdict: bot_right_trivial
+    claim: New hard cross-module dependency threat_intel to ticket_sync
+    why: Real, but threat_intel already couples to CRE and all integrations load in one Celery app.
+
+  - id: mr41-field-autoregistration
+    project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 41
+    file: acme/integrations/service_desk/tasks/pull_data_items.py
+    line: 383
+    verdict: bot_right_trivial
+    claim: ticket_sync field auto-registration causes field proliferation
+    why: Reuses the pre-existing upsert-by-name helper, capped by a seen-set, and is the function's documented purpose.
+
+  - id: mr60-creshare-omission
+    project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 60
+    file: acme/integrations/threat_intel/models/business_rule.py
+    line: 298
+    verdict: bot_right_trivial
+    claim: validate_sharedWith omits the current rule's existing creShare fields
+    why: validate_creShare enforces strict mutual exclusion, so a rule can never hold both.
+
+  - id: mr60-test-fixture-mongo
+    project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 60
+    file: tests/api/integrations/threat_intel/test_sharing_configuration.py
+    line: 22
+    verdict: human_right
+    claim: Test fixture mutates a shared MongoDB settings collection
+    why: Pure MagicMock with connector and helper patched, and the line is pre-existing code the diff never touches.
+
+  - id: mr53-pipestatus
+    project_path: acme-security-exchange-key-sec/acme-security-exchange-ui
+    mr_iid: 53
+    file: .gitlab-ci.yml
+    line: 115
+    verdict: human_right
+    claim: PIPESTATUS is bash-specific and fails on /bin/sh runners
+    why: build_ui is a Shell-executor job (tags shell/new_shell, no image), which defaults to bash.
+
+  - id: mr49-enforcefocus
+    project_path: acme-security-exchange-key-sec/acme-security-exchange-ui
+    mr_iid: 49
+    file: src/components/Integrations/Settings/Components/PluginRepo/UpdateConfiguration.jsx
+    line: 55
+    verdict: human_right
+    claim: Modal focus trap disabled, accessibility regression
+    why: enforceFocus={false} appears in 24 other modals; it is the app's established nested-modal workaround.
+
+  - id: mr32-generatealert-default
+    project_path: acme-security-exchange-key-sec/acme-security-exchange-ui
+    mr_iid: 32
+    file: src/components/Sharing/SharingForm.jsx
+    line: 126
+    verdict: human_right
+    claim: Wrong default for generateAlert when editing an existing config
+    why: >
+      Action.generateAlert defaults to False for legacy actions; the Field(True)
+      it cited is a different global-only default. Its suggested fix would have
+      switched alerts on for every legacy rule.
+
+  - id: mr61-db-in-validator
+    project_path: acme-security-exchange-key-sec/acme-security-exchange
+    mr_iid: 61
+    file: acme/integrations/rules_v2/models/business_rules.py
+    line: 210
+    verdict: human_right
+    claim: "Layering violation: database query inside a model validator"
+    why: 50+ find_one calls inside validators across six modules; it is the codebase's universal pattern.
+
+  - id: mr12-shell-injection
+    project_path: acme-security-exchange-key-sec/acme-security-exchange-docker-compose
+    mr_iid: 12
+    file: ce_healthcheck
+    line: 1763
+    verdict: bot_right
+    claim: file_contains and ha_peer_ports silently PASS when a pass/fail pattern is absent
+    why: >
+      Human confirmed and fixed it, calling the analysis accurate throughout.
+      The only bot_right item currently in the set, so recall is measured on a
+      single example -- treat a recall figure as directional, not precise.
