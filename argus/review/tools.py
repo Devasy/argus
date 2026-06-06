@@ -30,6 +30,7 @@ MAX_TOOL_RESULT_CHARS = 24_000
 # marking them "fetched" -- see the comment on _truncate_result for why that
 # distinction matters. Keep this in sync with the message text below.
 TRUNCATION_MARKER = "omitted to stay within the"
+CLIP_NOTE_RESERVE = 400
 
 
 def _truncate_result(blocks: list[str], what: str) -> str:
@@ -47,18 +48,26 @@ def _truncate_result(blocks: list[str], what: str) -> str:
     could never be re-requested -- every retry was rejected as a
     DUPLICATE CALL pointing at a result that was never actually shown."""
     out: list[str] = []
-    used = 0
-    for i, b in enumerate(blocks):
-        if used + len(b) > MAX_TOOL_RESULT_CHARS:
-            dropped = len(blocks) - i
-            out.append(
-                f"[truncated: {dropped} of {len(blocks)} {what} {TRUNCATION_MARKER} "
-                f"the {MAX_TOOL_RESULT_CHARS}-character tool-result "
-                f"limit. Re-request the ones you still need in smaller "
-                f"batches or narrower ranges.]")
-            break
-        out.append(b)
-        used += len(b) + 1
+    used, dropped = 0, 0
+    for b in blocks:
+        if used + len(b) <= MAX_TOOL_RESULT_CHARS:
+            out.append(b)
+            used += len(b) + 1
+        elif not out and len(b) > MAX_TOOL_RESULT_CHARS:
+            # One item bigger than the whole limit would otherwise never be deliverable.
+            keep = MAX_TOOL_RESULT_CHARS - CLIP_NOTE_RESERVE
+            out.append(b[:keep] + f"\n[clipped: this item is {len(b)} characters, only the first "
+                       f"{keep} are shown. Read the rest with get_file_lines using its line numbers; "
+                       f"re-requesting it here returns the same clipped text.]")
+            used = MAX_TOOL_RESULT_CHARS
+        else:
+            dropped += 1
+    if dropped:
+        out.append(
+            f"[truncated: {dropped} of {len(blocks)} {what} {TRUNCATION_MARKER} "
+            f"the {MAX_TOOL_RESULT_CHARS}-character tool-result "
+            f"limit. Re-request the ones you still need in smaller "
+            f"batches or narrower ranges.]")
     return "\n".join(out)
 
 
@@ -154,7 +163,9 @@ def build_read_tools(ctx: ToolContext) -> list:
                     "the file_ids argument instead)")
                 continue
             if h.file_id not in ctx.files_by_id:
-                blocks.append(f"hunk {hid} is outside the current review scope")
+                blocks.append(f"hunk {hid} is outside the current review scope (in an incremental "
+                              "re-review, files unchanged since the last review are out of scope; "
+                              "read them with get_file_lines if you need context)")
                 continue
             fc = ctx.files_by_id[h.file_id]
             blocks.append(f"--- hunk {hid} ({fc.path}) ---\n{h.diff_text}")

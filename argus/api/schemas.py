@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, computed_field
 
@@ -11,6 +12,8 @@ class RepositoryOut(BaseModel):
     gitlab_project_id: int
     enabled: bool
     poll_interval_s: int
+    stale_mr_after_days: int
+    learnings_cooldown_hours: int
     default_profile_id: uuid.UUID | None = None
     auto_review_enabled: bool = False
     mr_count: int = 0
@@ -34,6 +37,7 @@ class MergeRequestOut(BaseModel):
     accepted_count: int = 0
     rejected_count: int = 0
     leftover_count: int = 0
+    is_stale: bool = False
 
 
 class MergeRequestStateCounts(BaseModel):
@@ -150,6 +154,8 @@ class ReviewerProfileOut(BaseModel):
 class RepositoryUpdate(BaseModel):
     enabled: bool | None = None
     poll_interval_s: int | None = None
+    stale_mr_after_days: int | None = None
+    learnings_cooldown_hours: int | None = None
     default_profile_id: uuid.UUID | None = None
     auto_review_enabled: bool | None = None
 
@@ -165,6 +171,19 @@ class RepoAgentSettingOut(BaseModel):
 
 class RepoAgentSettingUpdate(BaseModel):
     enabled: bool
+
+
+class RepoSisterLinkIn(BaseModel):
+    sister_repo_id: uuid.UUID
+    # None = the sister's default branch.
+    branch: str | None = None
+    match_source_branch: bool = True
+    enabled: bool = True
+
+
+class RepoSisterLinkOut(RepoSisterLinkIn):
+    sister_project_path: str
+    sister_default_branch: str | None = None
 
 
 class ReviewerProxyUpdate(BaseModel):
@@ -380,17 +399,116 @@ class PaginatedAuditVerdicts(BaseModel):
     per_page: int
 
 
+class MeOut(BaseModel):
+    role: Literal["user", "admin"]
+    # Human-readable only, not a real identity yet -- see api/auth.py.
+    label: str
+
+
+class QueueKindCountOut(BaseModel):
+    kind: str
+    queued: int
+    running: int
+
+
+class OpsStatsOut(BaseModel):
+    jobs_by_kind: list[QueueKindCountOut]
+    reviews_queued: int
+    reviews_running: int
+    reviews_failed: int
+    distillation_queued: int
+    distillation_running: int
+    distillation_failed: int
+    audits_running: int
+    audits_failed: int
+
+
 class DashboardTilesOut(BaseModel):
     mrs_reviewed: int
     agent_comments: int
     human_replies: int
     accepted: int
     rejected: int
+    # Subset of `accepted`: fixes argus's follow-up verified in the code (disposition accepted_by_followup).
+    accepted_by_followup: int = 0
     acceptance_rate: float | None = None
     active_learnings: int
     pending_distillation: int
     prompt_tokens: int
     completion_tokens: int
+
+
+class TATMetricOut(BaseModel):
+    avg_s: float | None = None
+    p50_s: float | None = None
+    p95_s: float | None = None
+    sample_size: int
+
+
+class TATStatsOut(BaseModel):
+    review: TATMetricOut
+    distillation: TATMetricOut
+    audit: TATMetricOut
+    time_to_first_bot_comment: TATMetricOut
+
+
+class UserAuthorStatsOut(BaseModel):
+    accepted: int
+    rejected: int
+    open: int
+
+
+class UserReviewerStatsOut(BaseModel):
+    comments: int
+    resolved: int
+    rejected: int
+    ignored: int
+
+
+class UserStatsOut(BaseModel):
+    actor_id: uuid.UUID
+    username: str
+    display_name: str | None = None
+    prs_authored: int
+    author_stats: UserAuthorStatsOut
+    reviewer_stats: UserReviewerStatsOut
+
+
+class UserStatsListOut(BaseModel):
+    window_days: int | None = None
+    items: list[UserStatsOut]
+
+
+class CommentSourceBucketOut(BaseModel):
+    resolved: int
+    rejected: int
+    ignored: int
+
+
+class CommentSourceStatsOut(BaseModel):
+    window_days: int | None = None
+    bot: CommentSourceBucketOut
+    human: CommentSourceBucketOut
+
+
+class ReviewerGraphNodeOut(BaseModel):
+    actor_id: uuid.UUID
+    username: str
+    display_name: str | None = None
+
+
+class ReviewerGraphEdgeOut(BaseModel):
+    reviewer_id: uuid.UUID
+    author_id: uuid.UUID
+    comments: int
+    resolved: int
+    rejected: int
+    ignored: int
+
+
+class ReviewerGraphOut(BaseModel):
+    nodes: list[ReviewerGraphNodeOut]
+    edges: list[ReviewerGraphEdgeOut]
 
 
 class DashboardDayOut(BaseModel):
@@ -420,6 +538,7 @@ class DashboardActivityOut(BaseModel):
 class DashboardStatsOut(BaseModel):
     window_days: int
     tiles: DashboardTilesOut
+    ops: OpsStatsOut
     reviews_per_day: list[DashboardDayOut]
     agents: list[DashboardAgentOut]
     activity: list[DashboardActivityOut]

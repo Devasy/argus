@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from argus.config import Settings
-from argus.domain.models import Review, ReviewStage
+from argus.domain.models import AgentComplaint, Review, ReviewStage
 from argus.llm.config import LLMConfig
 from argus.llm.factory import build_chat_model
 from argus.llm.prompts import PromptBlocks, assemble_system_prompt
@@ -29,6 +29,7 @@ from argus.review.stages import (ANALYSIS_STATIC, LENS_PROMPTS,
                                      QA_SCENARIOS_STATIC, SCOUT_STATIC,
                                      VERIFY_STATIC, FindingList, ScoutOutput,
                                      TestScenarioList, VerdictList)
+from argus.review.sisters import SISTER_TOOL_NAMES
 from argus.review.tools import (ToolContext, build_read_tools,
                                     build_report_problem_tool, summary_table)
 
@@ -46,8 +47,29 @@ logger = logging.getLogger("argus.pipeline")
 # the agents running custom, allowlist-bearing prompts are exactly the ones
 # whose configuration is most likely to be wrong, so denying them the
 # complaint channel would silence the reports that matter most.
+# Sister-repo tools exist only when a repo opted in, and are read-only navigation like the above.
 ALWAYS_AVAILABLE_TOOLS = frozenset({"outline_file", "search_code",
-                                    "report_problem"})
+                                    "report_problem"}) | SISTER_TOOL_NAMES
+
+
+def chunk_token_budget(settings) -> int:
+    """Diff tokens per analysis chunk: the explicit setting, else a fifth of the context window."""
+    explicit = getattr(settings, "chunk_token_budget", 0) or 0
+    return explicit if explicit > 0 else max(4000, settings.model_context_window // 5)
+
+
+def chunk_scope_note(chunk: Chunk, hunks: dict) -> str:
+    """Extra instruction for a chunk that is one part of a large, split file."""
+    if not chunk.hunk_ids:
+        return ""
+    ranges = []
+    for hid in chunk.hunk_ids:
+        h = hunks.get(hid)
+        ranges.append(f"{hid} (new lines {h.new_start}-{h.new_start + max(h.new_lines, 1) - 1})"
+                      if h else hid)
+    return (f"\n\nPART {chunk.part or '?'} of a large file that was split by size. Review ONLY "
+            f"these hunks: {', '.join(ranges)}. The other parts are reviewed separately; read "
+            f"them only when you need context, and do not report findings on them.")
 
 
 class ReviewCanceled(Exception):
@@ -91,6 +113,8 @@ class PipelineDeps(BaseModel):
     extra_tools: list = []
     graphify_tools: list = []
     skill_tools: list = []
+    # Short names of sister repos this review can read; enables the foreign-file publish guard.
+    sister_repos: list[str] = []
     tool_allowlist: list[str] | None = None
     # langfuse_session_id/langfuse_user_id/langfuse_tags keys, plus plain
     # review/repo/model context -- see runner.py for how this is built.
@@ -189,6 +213,17 @@ def _model(deps: PipelineDeps, review_id: str, stage_name: str,
     return build_chat_model(llm_cfg, callbacks=[cb]), callbacks
 
 
+# Groq rejects max_tokens > 16384 on this model even when input + output
+# together are well within its real (131072) context window -- a provider
+# ceiling on output length, not on the context budget _DynamicMaxTokens
+# already enforces from Settings.model_context_window/model_output_margin.
+GROQ_MAX_OUTPUT_TOKENS = 16384
+
+
+def _max_output_tokens_for(deps: "PipelineDeps") -> int | None:
+    return GROQ_MAX_OUTPUT_TOKENS if deps.llm_cfg.provider == "groq" else None
+
+
 def _metadata(deps: PipelineDeps, stage_name: str) -> dict:
     return {**deps.langfuse_metadata, "stage_name": stage_name}
 
@@ -242,7 +277,8 @@ def build_agent_tool(deps: PipelineDeps, review_id: str, agent: ResolvedAgent,
                 agent.max_rounds, callbacks=cbs,
                 metadata=_metadata(deps, stage_name),
                 context_window=deps.settings.model_context_window,
-                output_margin=deps.settings.model_output_margin)
+                output_margin=deps.settings.model_output_margin,
+                max_output_tokens=_max_output_tokens_for(deps))
         except stages.unrecoverable_stage_errors() as e:
             logger.error("specialist agent %s could not complete for chunk %s "
                          "(%s); returning no findings", agent.name, chunk_id,
@@ -310,7 +346,8 @@ def build_qa_scenario_tool(deps: PipelineDeps, review_id: str, chunk_id: str,
                 "Chunk files:\n" + files_summary,
                 TestScenarioList, deps.settings.qa_scenario_max_rounds,
                 callbacks=cbs, context_window=deps.settings.model_context_window,
-                output_margin=deps.settings.model_output_margin)
+                output_margin=deps.settings.model_output_margin,
+                max_output_tokens=_max_output_tokens_for(deps))
         except stages.unrecoverable_stage_errors() as e:
             logger.error("qa_scenario tool could not complete for chunk %s "
                          "(%s); returning no scenarios", chunk_id,
@@ -328,6 +365,89 @@ def build_qa_scenario_tool(deps: PipelineDeps, review_id: str, chunk_id: str,
         return out.model_dump_json()
 
     return generate_test_scenario
+
+
+def build_verify_delegate_tool(deps: PipelineDeps, review_id: str,
+                               findings_by_id: dict, listing_for, read_tools: list,
+                               collected: list):
+    """Wraps a scoped verification sub-agent as a callable tool for verify.
+
+    verify is the one stage whose work grows with the NUMBER of findings: it
+    must investigate every candidate's evidence AND compose a verdict for each
+    in a single turn. On a reasoning model that turn's thinking is what runs
+    out first, and the result is a technically-valid VerdictList that silently
+    covers only some of the findings it was given (review ff2a42b8 returned 1
+    verdict for 6 findings; ~26% of ollama-path reviews lost at least one
+    finding this way). Delegating the investigation moves the expensive part
+    into its own call with its own output budget, leaving the orchestrator a
+    cheap accept/reject decision over pre-digested evidence.
+
+    The delegate is advisory: it reports what it found back to verify, which
+    still issues every final verdict itself. `collected` is appended to as a
+    side effect purely as a safety net -- if the orchestrator's own answer
+    still comes back missing a finding_id, verify falls back to the delegate's
+    assessment for it rather than dropping it silently.
+
+    Stage name is f"verify_delegate:{n}" so the frontend's pipelineGraph.ts
+    renders each delegation as its own node (its SPECIALIST_STAGE_RE matches
+    any non-"analyze:" "<name>:<suffix>" stage) -- these are real nested agent
+    runs and should be as visible in the graph as analyze's specialists."""
+    from langchain_core.tools import tool
+
+    counter = {"n": 0}
+
+    @tool
+    async def investigate_findings(finding_ids: list[str], focus: str) -> str:
+        """Delegate a GROUP of related candidate findings to a fresh verifier
+        sub-agent that investigates them against the real source and reports
+        back. Group findings that share a file, or whose validity turns on the
+        same code path, into ONE call -- the sub-agent reads that file once
+        and judges them together, which is both cheaper and more consistent
+        than checking them separately. Pass `focus`: what specifically to
+        check for this group (which file/symbol to read, which claim is in
+        doubt, what would make these valid or invalid) -- this becomes the
+        sub-agent's instructions, so be specific. Returns its per-finding
+        assessment as JSON. You remain responsible for the final verdicts:
+        weigh what it reports, and issue your own verdict for every finding."""
+        wanted = [findings_by_id[fid] for fid in finding_ids
+                  if fid in findings_by_id]
+        if not wanted:
+            return ('{"verdicts": []}  // no such finding_id in this review -- '
+                    'pass ids exactly as given to you')
+        counter["n"] += 1
+        stage_name = f"verify_delegate:{counter['n']}"
+        model, cbs = _model(deps, review_id, stage_name)
+        try:
+            out: VerdictList = await stages.run_stage_agent(
+                model, read_tools,
+                _prompt(deps, VERIFY_STATIC,
+                        f"Stage: verify (delegated investigation).\n"
+                        f"You are checking a specific group of candidate "
+                        f"findings on behalf of the verifier. Investigate them "
+                        f"against the real source and return one verdict per "
+                        f"finding with the evidence you actually found.\n\n"
+                        f"What to focus on: {focus}"),
+                "Candidate findings:\n\n" + listing_for(wanted),
+                VerdictList,
+                deps.settings.verify_max_rounds * max(1, len(wanted)),
+                callbacks=cbs, metadata=_metadata(deps, stage_name),
+                context_window=deps.settings.model_context_window,
+                output_margin=deps.settings.model_output_margin,
+                max_output_tokens=_max_output_tokens_for(deps))
+        except stages.unrecoverable_stage_errors() as e:
+            logger.error("verify delegate could not complete for %s (%s); "
+                         "returning no assessment", finding_ids, type(e).__name__)
+            await _record_stage(
+                deps, review_id, stage_name, None,
+                error=f"delegate could not complete: {str(e)[:1500]}")
+            return VerdictList(verdicts=[]).model_dump_json()
+        collected.extend(out.verdicts)
+        await _record_stage(deps, review_id, stage_name,
+                            {"focus": focus, "finding_ids": finding_ids,
+                             "verdicts": [v.model_dump() for v in out.verdicts]})
+        return out.model_dump_json()
+
+    return investigate_findings
 
 
 # publisher hook — real implementation in publisher.py (Task 6); imported late
@@ -385,7 +505,8 @@ def build_graph(deps: PipelineDeps, checkpointer):
                 ScoutOutput, deps.settings.scout_max_rounds, callbacks=cbs,
                 metadata=_metadata(deps, "scout"),
                 context_window=deps.settings.model_context_window,
-                output_margin=deps.settings.model_output_margin)
+                output_margin=deps.settings.model_output_margin,
+                max_output_tokens=_max_output_tokens_for(deps))
 
         import litellm
 
@@ -426,7 +547,8 @@ def build_graph(deps: PipelineDeps, checkpointer):
         flagged = apply_risk_flags(files)
         for f in flagged:
             f.summary = out.file_summaries.get(f.file_id, f.summary)
-        chunks = plan_chunks(flagged, deps.settings.max_chunk_files)
+        chunks = plan_chunks(flagged, deps.settings.max_chunk_files,
+                             hunks=deps.tool_ctx.hunks, token_budget=chunk_token_budget(deps.settings))
         merged_agents = list(dict.fromkeys(out.assigned_agents + deps.force_agents))
         plan = ReviewPlan(intent=out.intent, mr_summary=out.mr_summary,
                           files=flagged, chunks=chunks,
@@ -505,11 +627,13 @@ def build_graph(deps: PipelineDeps, checkpointer):
                     f"Stage: analysis, chunk {chunk.chunk_id}.\n{lens_text}\n"
                     f"Scout notes: {state.plan.notes_for_agents}"
                     f"{_specialist_hint(chunk, state.plan)}"),
-            "Your assigned files:\n" + summary_table(member_files),
+            "Your assigned files:\n" + summary_table(member_files)
+            + chunk_scope_note(chunk, deps.tool_ctx.hunks),
             FindingList, deps.settings.analysis_max_rounds, callbacks=cbs,
             metadata=_metadata(deps, f"analyze:{chunk.chunk_id}"),
             context_window=deps.settings.model_context_window,
-            output_margin=deps.settings.model_output_margin)
+            output_margin=deps.settings.model_output_margin,
+                max_output_tokens=_max_output_tokens_for(deps))
         found = []
         for i, f in enumerate(out.findings, start=1):
             f.finding_id = f"{chunk.chunk_id}-a{i}"
@@ -520,12 +644,29 @@ def build_graph(deps: PipelineDeps, checkpointer):
                 f.finding_id = f"{chunk.chunk_id}-{agent_name}{i}"
                 f.stage, f.chunk_id = agent_name, chunk.chunk_id
                 found.append(f)
+        # Per-chunk completion; without it the graph can't tell a finished chunk from one still running until every chunk is done.
+        await _record_stage(deps, state.review_id, f"analyze:{chunk.chunk_id}",
+                            {"findings": [f.model_dump() for f in found]})
         return found
 
     async def _analyze_chunk_with_split_retry(state: ReviewState, chunk: Chunk) -> list:
         try:
             return await _run_analyze_chunk(state, chunk)
         except stages.context_overflow_errors():
+            if len(chunk.file_ids) == 1:
+                own = chunk.hunk_ids or next(
+                    (f.hunk_ids for f in state.plan.files if f.file_id == chunk.file_ids[0]), [])
+                if len(own) > 1:
+                    logger.warning("chunk %s (one file, %d hunks) exceeded the context window; "
+                                   "splitting its hunks in two and retrying", chunk.chunk_id, len(own))
+                    mid = len(own) // 2
+                    found = []
+                    for suffix, part in (("a", own[:mid]), ("b", own[mid:])):
+                        found += await _analyze_chunk_with_split_retry(state, Chunk(
+                            chunk_id=f"{chunk.chunk_id}{suffix}", file_ids=chunk.file_ids,
+                            lenses=chunk.lenses, hunk_ids=part,
+                            part=f"{chunk.part or '1/1'}.{suffix}"))
+                    return found
             if len(chunk.file_ids) <= 1:
                 logger.error(
                     "chunk %s (single file %s) exceeds the model context "
@@ -603,7 +744,8 @@ def build_graph(deps: PipelineDeps, checkpointer):
                 FindingList, agent.max_rounds, callbacks=cbs,
                 metadata=_metadata(deps, agent_name),
                 context_window=deps.settings.model_context_window,
-                output_margin=deps.settings.model_output_margin)
+                output_margin=deps.settings.model_output_margin,
+                max_output_tokens=_max_output_tokens_for(deps))
         except stages.unrecoverable_stage_errors() as e:
             # A specialist agent's whole-MR view is not splittable by design
             # (that is the point of the stage). Losing one agent's findings
@@ -651,12 +793,14 @@ def build_graph(deps: PipelineDeps, checkpointer):
                              f"qa_chunk:{chunk.chunk_id}"),
             _prompt(deps, QA_SCENARIOS_STATIC,
                     f"Stage: qa_scenarios, chunk {chunk.chunk_id}."),
-            "Your assigned files:\n" + summary_table(member_files),
+            "Your assigned files:\n" + summary_table(member_files)
+            + chunk_scope_note(chunk, deps.tool_ctx.hunks),
             TestScenarioList, deps.settings.qa_scenarios_max_rounds,
             callbacks=cbs,
             metadata=_metadata(deps, f"qa_chunk:{chunk.chunk_id}"),
             context_window=deps.settings.model_context_window,
-            output_margin=deps.settings.model_output_margin)
+            output_margin=deps.settings.model_output_margin,
+                max_output_tokens=_max_output_tokens_for(deps))
         scenarios = []
         for i, s in enumerate(out.scenarios, start=1):
             s.scenario_id = f"{chunk.chunk_id}-qa{i}"
@@ -707,10 +851,22 @@ def build_graph(deps: PipelineDeps, checkpointer):
                             {"findings": [f.model_dump() for f in state.findings]})
         return {}
 
-    async def verify(state: ReviewState) -> dict:
-        await _raise_if_canceled(deps.sf, state.review_id)
+    async def _verify_bucket(state: ReviewState, bucket_id: str,
+                             findings: list) -> dict:
+        """Verify one chunk's findings. Split off from `verify()` proper so it
+        can run as its own Send branch per chunk (see fan_out_verify) instead
+        of one free-form call over the whole review: scout's specialist
+        delegation is a code-guaranteed graph fan-out (every assigned agent
+        gets its own Send, and LangGraph's operator.add reducer merges every
+        branch's findings), but this stage used to be a single open-ended
+        agentic loop asked in prose to cover an arbitrary-length list -- the
+        model just running out of attention on a big batch is exactly how a
+        critical finding on NCTE plugins !181 got no verdict and silently
+        never published. Chunking verify the same way analyze is chunked
+        bounds each call's list to what one chunk actually produced."""
+        stage_name = f"verify:{bucket_id}"
         # Grounding flags verify instead of gating in front of it -- a mechanical check can't tell a hallucination from a decorated/relocated quote, so verify's own reject/`corrected` call decides.
-        results = ground_results(state.findings, deps.tool_ctx.workspace)
+        results = ground_results(findings, deps.tool_ctx.workspace)
         flagged_ids = {r.finding_id for r in results if not r.grounded}
         line_corrections = {r.finding_id: r.corrected_line for r in results
                             if r.grounded and r.corrected_line is not None}
@@ -720,13 +876,11 @@ def build_graph(deps: PipelineDeps, checkpointer):
         findings_for_verify = [
             f.model_copy(update={"line": line_corrections[f.finding_id]})
             if f.finding_id in line_corrections else f
-            for f in state.findings]
+            for f in findings]
         if not findings_for_verify:
-            await _record_stage(deps, state.review_id, "verify",
-                                {"verdicts": [], "ungrounded": list(flagged_ids)})
             return {"verdicts": [], "ungrounded_ids": list(flagged_ids),
                     "line_corrections": line_corrections}
-        model, cbs = _model(deps, state.review_id, "verify")
+        model, cbs = _model(deps, state.review_id, stage_name)
         # Run the "is this already the convention?" search rather than asking
         # the model to remember to (see review/prevalence.py).
         notes = await prevalence_notes(deps.tool_ctx.workspace, findings_for_verify)
@@ -737,34 +891,62 @@ def build_graph(deps: PipelineDeps, checkpointer):
                      "or accept with `corrected` set to the real "
                      "file_path/line/evidence_quote if you locate it.")
 
-        async def _verify_batch(batch: list) -> list:
-            """Verify one batch of findings, halving and recursing if the
-            listing does not fit. verify is the one stage whose prompt grows
-            with the NUMBER of findings, so a big review can overflow here even
-            when every individual finding is small."""
-            listing = "\n\n".join(
+        def _listing_for(batch: list) -> str:
+            return "\n\n".join(
                 f"finding_id={f.finding_id} file={f.file_path}:{f.line} "
                 f"sev={f.severity}\n{f.title}\n{f.body}\n"
                 f"evidence: {f.evidence_quote!r}"
                 + (f"\n{notes[f.finding_id]}" if f.finding_id in notes else "")
                 + (f"\n{flag_note}" if f.finding_id in flagged_ids else "")
                 for f in batch)
+
+        findings_by_id = {f.finding_id: f for f in findings_for_verify}
+        # Filled by delegated sub-agents; consulted only for findings the
+        # orchestrator's own answer never covers (see the backfill below).
+        delegated: list = []
+        delegate_tool = build_verify_delegate_tool(
+            deps, state.review_id, findings_by_id, _listing_for,
+            base_tools + graphify_tools, delegated)
+
+        # finding_ids of every batch that got a real, well-formed VerdictList
+        # back (as opposed to being dropped by the except branch below).
+        # Coverage gaps are only retried within this set -- a batch that
+        # errored out already got its documented drop-to-no-verdicts
+        # treatment, and retrying it would just hit the same error again.
+        answered_batch_ids: set[str] = set()
+
+        async def _verify_batch(batch: list) -> list:
+            """Verify one batch of findings, halving and recursing if the
+            listing does not fit. verify is the one stage whose prompt grows
+            with the NUMBER of findings, so a big review can overflow here even
+            when every individual finding is small."""
+            listing = _listing_for(batch)
             try:
-                verify_instructions = "Stage: verify."
+                verify_instructions = (
+                    "Stage: verify.\n\n"
+                    "For anything that needs real investigation, delegate with "
+                    "investigate_findings rather than reading every file "
+                    "yourself: group findings that sit in the same file, or "
+                    "whose validity turns on the same code path, into ONE "
+                    "call per group. Then decide every finding's verdict "
+                    "yourself from what the delegates report -- you must still "
+                    "return one verdict per finding you were given.")
                 if deps.verify_context:
                     verify_instructions += "\n\n" + deps.verify_context
                 out: VerdictList = await stages.run_stage_agent(
                     model,
-                    _with_complaints(base_tools + graphify_tools,
-                                     state.review_id, "verify"),
+                    _with_complaints(base_tools + graphify_tools + [delegate_tool],
+                                     state.review_id, stage_name),
                     _prompt(deps, VERIFY_STATIC, verify_instructions),
                     "Candidate findings:\n\n" + listing,
                     VerdictList,
                     deps.settings.verify_max_rounds * max(1, len(batch)),
                     callbacks=cbs,
-                    metadata=_metadata(deps, "verify"),
+                    metadata=_metadata(deps, stage_name),
                     context_window=deps.settings.model_context_window,
-                    output_margin=deps.settings.model_output_margin)
+                    output_margin=deps.settings.model_output_margin,
+                max_output_tokens=_max_output_tokens_for(deps))
+                answered_batch_ids.update(f.finding_id for f in batch)
                 return list(out.verdicts)
             except stages.unrecoverable_stage_errors() as e:
                 import litellm
@@ -789,11 +971,100 @@ def build_graph(deps: PipelineDeps, checkpointer):
                 return []
 
         verdicts = await _verify_batch(findings_for_verify)
-        await _record_stage(deps, state.review_id, "verify",
-                            {"verdicts": [v.model_dump() for v in verdicts],
-                             "ungrounded": list(flagged_ids)})
+        # The orchestrator's answer is authoritative, but it can come back
+        # covering only some of the findings it was given (a reasoning model
+        # that runs out of thinking mid-answer still emits a well-formed,
+        # short VerdictList). Anything it never ruled on falls back to the
+        # delegate that actually investigated it, rather than being dropped
+        # unverified -- which is what used to happen, silently.
+        answered = {v.finding_id for v in verdicts}
+        backfilled = [v for v in delegated
+                      if v.finding_id not in answered
+                      and v.finding_id in findings_by_id]
+        if backfilled:
+            seen: set[str] = set()
+            for v in backfilled:
+                if v.finding_id in seen:
+                    continue
+                seen.add(v.finding_id)
+                verdicts.append(v)
+            logger.warning(
+                "%s returned no verdict for %d finding(s); using the "
+                "delegated assessment for %s", stage_name, len(seen), sorted(seen))
+        # Neither answered directly nor covered by a delegate: the model
+        # simply stopped short of its full list (no ContextWindowExceeded,
+        # no recursion limit -- it just never got there). One retry on a
+        # small, focused batch of only the missing findings usually gets
+        # full coverage where the original wider batch did not -- chunking
+        # already shrank that batch, this is the remaining safety net for
+        # whatever gap chunking alone doesn't close.
+        covered = {v.finding_id for v in verdicts}
+        missing = [f for fid, f in findings_by_id.items()
+                  if fid not in covered and fid in answered_batch_ids]
+        if missing:
+            logger.warning(
+                "%s covered %d of %d findings; retrying the %d it "
+                "skipped: %s", stage_name, len(covered), len(findings_by_id),
+                len(missing), sorted(f.finding_id for f in missing))
+            retried = await _verify_batch(missing)
+            verdicts.extend(retried)
+            covered |= {v.finding_id for v in retried}
+            still_missing = [f for f in missing if f.finding_id not in covered]
+            if still_missing:
+                logger.error(
+                    "%s never produced a verdict for %d finding(s) after "
+                    "a retry; they will not be published: %s", stage_name,
+                    len(still_missing), sorted(f.finding_id for f in still_missing))
+                async with deps.sf() as s:
+                    for f in still_missing:
+                        s.add(AgentComplaint(
+                            review_id=state.review_id, stage_name=stage_name,
+                            category="task_impossible", target=f.finding_id,
+                            detail=(f"verify never returned a verdict for this finding "
+                                    f"({f.severity} severity: {f.title!r}), even after a "
+                                    "focused retry, so it was dropped without publishing."),
+                            blocked=True))
+                    await s.commit()
+        # Same reason as analyze's per-chunk row: marks this branch finished before gather_verify writes the aggregate.
+        await _record_stage(deps, state.review_id, stage_name,
+                            {"verdicts": [v.model_dump() for v in verdicts]})
         return {"verdicts": verdicts, "ungrounded_ids": list(flagged_ids),
                 "line_corrections": line_corrections}
+
+    def fan_out_verify(state: ReviewState):
+        """One verify branch per chunk that produced findings -- code-guaranteed
+        coverage the same way fan_out guarantees every assigned specialist
+        actually runs, instead of relying on one big free-form call to cover
+        an arbitrary-length list of findings by itself. Findings with no
+        chunk_id (the deprecated whole-MR run_reviewer_agent path) share one
+        'whole-mr' bucket. No findings at all -- a clean MR -- skips straight
+        to gather_verify rather than sending zero branches, which would
+        never trigger it."""
+        buckets: dict[str, list[str]] = {}
+        for f in state.findings:
+            buckets.setdefault(f.chunk_id or "whole-mr", []).append(f.finding_id)
+        if not buckets:
+            return ["gather_verify"]
+        return [Send("verify_chunk", {"state": state, "bucket_id": bucket_id,
+                                      "finding_ids": finding_ids})
+                for bucket_id, finding_ids in sorted(buckets.items())]
+
+    async def verify_chunk(payload: dict) -> dict:
+        state = payload["state"]
+        await _raise_if_canceled(deps.sf, state.review_id)
+        bucket_id = payload["bucket_id"]
+        wanted = set(payload["finding_ids"])
+        findings = [f for f in state.findings if f.finding_id in wanted]
+        return await _verify_bucket(state, bucket_id, findings)
+
+    async def gather_verify(state: ReviewState) -> dict:
+        await _record_stage(
+            deps, state.review_id, "verify",
+            {"verdicts": [v.model_dump() for v in state.verdicts],
+             "ungrounded": state.ungrounded_ids,
+             "unresolved": sorted({f.finding_id for f in state.findings}
+                                  - {v.finding_id for v in state.verdicts})})
+        return {}
 
     async def publish(state: ReviewState) -> dict:
         await _raise_if_canceled(deps.sf, state.review_id)
@@ -823,13 +1094,16 @@ def build_graph(deps: PipelineDeps, checkpointer):
         g.add_node("analyze_chunk", analyze_chunk)
         g.add_node("run_reviewer_agent", run_reviewer_agent)
         g.add_node("gather", gather)
-        g.add_node("verify", verify)
+        g.add_node("verify_chunk", verify_chunk)
+        g.add_node("gather_verify", gather_verify)
         g.add_conditional_edges(
             "scout", fan_out, ["analyze_chunk", "run_reviewer_agent"])
         g.add_edge("analyze_chunk", "gather")
         g.add_edge("run_reviewer_agent", "gather")
-        g.add_edge("gather", "verify")
-        g.add_edge("verify", "publish")
+        g.add_conditional_edges(
+            "gather", fan_out_verify, ["verify_chunk", "gather_verify"])
+        g.add_edge("verify_chunk", "gather_verify")
+        g.add_edge("gather_verify", "publish")
 
     g.add_edge("publish", END)
     return g.compile(checkpointer=checkpointer)

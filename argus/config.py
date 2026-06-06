@@ -8,6 +8,10 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://argus:argus@localhost:5433/argus"
     api_token: str = ""
+    # Separate from api_token: gates the admin-only stats routes (per-user
+    # stats, reviewer graph, ops tiles) so the regular app token doesn't also
+    # grant access to org-wide people data.
+    admin_token: str = ""
     gitlab_url: str = ""
     gitlab_token: str = ""
     gitlab_ca_bundle: str | None = None
@@ -25,6 +29,12 @@ class Settings(BaseSettings):
     poll_interval_s: int = 120
     poller_enabled: bool = False
     worker_enabled: bool = False
+    # JSON list of {"id", "kinds", "endpoint"?}; empty = one worker for every kind (see jobs/workers.py).
+    worker_specs: str = ""
+    # Incremental re-reviews check earlier bot comments: off | reply_only (say "looks fixed") | resolve.
+    followup_mode: str = "reply_only"
+    # Diff tokens per analysis chunk; 0 = auto (model_context_window // 5). Large files split by hunks.
+    chunk_token_budget: int = 0
     workspace_root: str = "~/.argus/repos"
 
     log_level: str = "INFO"
