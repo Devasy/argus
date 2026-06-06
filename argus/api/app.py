@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, WebSocket
@@ -12,7 +12,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from argus.api.auth import require_token
+from argus.api.auth import Principal, require_role
 from argus.api.schemas import (AuditVerdictOut, AvailableToolOut, DashboardStatsOut,
                                    DistillationRunOut,
                                    DistillationRunSummaryOut,
@@ -37,9 +37,15 @@ from argus.api.schemas import (AuditVerdictOut, AvailableToolOut, DashboardStats
                                    ReviewerProfileOut, ReviewerProxyCreate,
                                    ReviewerProxyOut, ReviewerProxyUpdate,
                                    RepoAgentSettingOut, RepoAgentSettingUpdate,
+                                   RepoSisterLinkIn, RepoSisterLinkOut,
                                    ReviewListItemOut, ReviewQueueSummaryOut,
-                                   ReviewSummaryOut, SettingsUpdate)
-from argus.api.stats import compute_dashboard_stats
+                                   ReviewSummaryOut, SettingsUpdate,
+                                   CommentSourceStatsOut,
+                                   ReviewerGraphOut, TATStatsOut, UserStatsListOut,
+                                   MeOut)
+from argus.api.stats import (compute_comment_source_stats, compute_dashboard_stats,
+                                 compute_reviewer_graph, compute_tat_stats,
+                                 compute_user_stats)
 from argus.config import Settings, get_settings
 from argus.db import get_engine, session_factory
 from argus.logging_setup import configure_logging
@@ -127,12 +133,13 @@ def _stage_dict(r: ReviewStage) -> dict:
 
 
 
-async def _run_distill_mr_job(sf, settings, payload: dict) -> None:
+async def _run_distill_mr_job(sf, settings, payload: dict,
+                              endpoint_name: str | None = None) -> None:
     from argus.domain.models import (Actor, DistillationRun, MergeRequest,
                                          Note, Repository)
     from argus.gitlab.client import GitLabClient
     from argus.knowledge.agentic_distiller import run_agentic_distillation_for_mr
-    from argus.llm.config import resolve_llm_config
+    from argus.jobs.workers import distill_llm_config
 
     mr_id = uuid.UUID(payload["mr_id"])
     note_ids = [uuid.UUID(n) for n in payload["note_ids"]]
@@ -143,7 +150,15 @@ async def _run_distill_mr_job(sf, settings, payload: dict) -> None:
         notes = (await session.execute(
             select(Note).where(Note.id.in_(note_ids),
                                Note.author_type == "human"))).scalars().all()
-        llm_cfg = await resolve_llm_config(session, None, None)
+        llm_cfg = await distill_llm_config(session, endpoint_name)
+        # Without this, a single hung connection to the LLM endpoint blocks
+        # forever with nothing to recover it -- unlike execute_review_job,
+        # this path never set a request timeout (see the 2026-09-21 incident:
+        # one stuck distill_mr call froze the whole backend's event loop for
+        # 8+ hours with the GPU itself sitting idle and healthy the entire
+        # time). num_retries on LLMConfig means a timeout here becomes a
+        # retry, not a hard failure.
+        llm_cfg.timeout = settings.review_llm_timeout_s
         run = DistillationRun(mr_id=mr_id, note_ids=[str(n) for n in note_ids],
                               status="running",
                               started_at=datetime.now(timezone.utc))
@@ -187,7 +202,14 @@ def create_app(settings: Settings | None = None,
     app = FastAPI(title="argus")
     app.state.settings = settings
     app.state.sf = sf
-    router = APIRouter(dependencies=[Depends(require_token)])
+    # Single dependency instances (not a fresh require_role("user") per use)
+    # so FastAPI's request-scoped dependency cache dedupes the router-level
+    # check against the same Depends(...) used explicitly by /me below --
+    # otherwise the token would be resolved twice per request to /me.
+    require_user = require_role("user")
+    require_admin = require_role("admin")
+    router = APIRouter(dependencies=[Depends(require_user)])
+    admin_router = APIRouter(dependencies=[Depends(require_admin)])
     stop = asyncio.Event()
 
     def _client() -> GitLabClient:
@@ -205,6 +227,30 @@ def create_app(settings: Settings | None = None,
         # satisfy.
         async with sf() as session:
             boot = await load_effective_settings(session, base=settings)
+        # Anything still 'running' at this exact point is orphaned by
+        # definition: this process has not claimed any work yet, so a row in
+        # that state can only be left over from a previous instance that
+        # died (crash, OOM, or froze and got restarted -- see the
+        # 2026-09-21 incident, where a hung LLM call with no timeout froze
+        # the whole event loop for 8+ hours, and the restart that fixed it
+        # left both a distill_mr job and its AuditRun-equivalent stuck
+        # 'running' forever, silencing their dedup_key/staleness checks for
+        # every run after). stale_after_s=0 reaps unconditionally here; the
+        # periodic reclaim_stale inside run_worker_forever keeps its
+        # deliberately conservative 24h threshold for jobs from a worker
+        # that dies without the whole process restarting.
+        from argus.jobs.queue import reclaim_stale
+        from argus.knowledge.audit_scheduler import reclaim_stale_audit_runs
+        async with sf() as session:
+            job_stats = await reclaim_stale(session, stale_after_s=0)
+            n_audits = await reclaim_stale_audit_runs(session, stale_after_s=0)
+            await session.commit()
+        if job_stats["requeued"] or job_stats["failed"] or n_audits:
+            logger.warning(
+                "startup reap: %d job(s) requeued, %d job(s) abandoned, "
+                "%d audit run(s) marked failed (all orphaned by a previous "
+                "process instance)", job_stats["requeued"], job_stats["failed"],
+                n_audits)
         if getattr(boot, "validate_embeddings_on_boot", False):
             from argus.knowledge.embeddings import validate_embedding_dimension
             await validate_embedding_dimension(boot)
@@ -219,21 +265,41 @@ def create_app(settings: Settings | None = None,
         if getattr(boot, "audit_enabled", False):
             async with sf() as session:
                 audit_llm_cfg = await resolve_llm_config(session, None, None)
+            # See the matching comment in _run_distill_mr_job -- this config
+            # is reused for every audit LLM call for the life of the process,
+            # so a missing timeout here is a standing risk, not a one-off.
+            audit_llm_cfg.timeout = boot.review_llm_timeout_s
             app.state.auditor = asyncio.create_task(
                 run_audit_forever(sf, boot, _client, audit_llm_cfg,
                                   sleep_seconds=3600))
         if getattr(boot, "worker_enabled", False):
-            async def _review(p):
+            from argus.jobs.workers import parse_worker_specs, review_handler
+
+            async def _run_review(p):
                 async with sf() as session:
                     eff = await load_effective_settings(session, base=settings)
                 return await execute_review_job(sf, eff, p)
-            async def _distill_mr(p):
-                async with sf() as session:
-                    eff = await load_effective_settings(session, base=settings)
-                await _run_distill_mr_job(sf, eff, p)
-            handlers = {"review": _review, "distill_mr": _distill_mr}
-            app.state.worker = asyncio.create_task(
-                run_worker_forever(sf, handlers, stop))
+
+            def _review_handler(endpoint: str | None):
+                return review_handler(sf, _run_review, endpoint)
+
+            def _distill_handler(endpoint: str | None):
+                async def _distill_mr(p):
+                    async with sf() as session:
+                        eff = await load_effective_settings(session, base=settings)
+                    await _run_distill_mr_job(sf, eff, p, endpoint_name=endpoint)
+                return _distill_mr
+
+            factories = {"review": _review_handler, "distill_mr": _distill_handler}
+            specs = parse_worker_specs(settings.worker_specs, list(factories))
+            app.state.workers = []
+            for spec in specs:
+                handlers = {k: factories[k](spec.endpoint) for k in spec.kinds}
+                logger.info("starting worker %s: kinds=%s endpoint=%s",
+                            spec.id, list(spec.kinds), spec.endpoint or "(default)")
+                app.state.workers.append(asyncio.create_task(
+                    run_worker_forever(sf, handlers, stop, worker_id=spec.id)))
+            app.state.worker = app.state.workers[0]
 
     @app.on_event("shutdown")
     async def _shutdown():
@@ -361,6 +427,11 @@ def create_app(settings: Settings | None = None,
                 raise HTTPException(404, "repository not found")
             if payload.poll_interval_s is not None and payload.poll_interval_s < 10:
                 raise HTTPException(422, "poll_interval_s must be >= 10")
+            if payload.stale_mr_after_days is not None and payload.stale_mr_after_days < 1:
+                raise HTTPException(422, "stale_mr_after_days must be >= 1")
+            if (payload.learnings_cooldown_hours is not None
+                    and payload.learnings_cooldown_hours < 0):
+                raise HTTPException(422, "learnings_cooldown_hours must be >= 0")
             if "default_profile_id" in payload.model_fields_set \
                     and payload.default_profile_id is not None:
                 if await session.get(ReviewerProfile,
@@ -421,6 +492,64 @@ def create_app(settings: Settings | None = None,
                 agent_id=agent.id, name=agent.name, description=agent.description,
                 globally_enabled=agent.enabled, enabled_here=payload.enabled)
 
+    @router.get("/repositories/{repo_id}/sisters", response_model=list[RepoSisterLinkOut])
+    async def get_repo_sisters(repo_id: uuid.UUID):
+        """Related repos that reviews of this repo may read (reference only). Empty by default."""
+        from argus.domain.models import RepoSisterLink
+        async with sf() as session:
+            if await session.get(Repository, repo_id) is None:
+                raise HTTPException(404, "repository not found")
+            rows = (await session.execute(
+                select(RepoSisterLink, Repository)
+                .join(Repository, Repository.id == RepoSisterLink.sister_repo_id)
+                .where(RepoSisterLink.repo_id == repo_id)
+                .order_by(Repository.project_path))).all()
+        return [RepoSisterLinkOut(sister_repo_id=link.sister_repo_id, branch=link.branch,
+                                  match_source_branch=link.match_source_branch,
+                                  enabled=link.enabled, sister_project_path=r.project_path,
+                                  sister_default_branch=r.default_branch)
+                for link, r in rows]
+
+    @router.put("/repositories/{repo_id}/sisters", response_model=list[RepoSisterLinkOut])
+    async def set_repo_sisters(repo_id: uuid.UUID, payload: list[RepoSisterLinkIn]):
+        """Replace this repo's related-repo list; each fixed branch must exist in GitLab."""
+        from argus.domain.models import RepoSisterLink
+        from argus.review.sisters import MAX_SISTERS
+        if len(payload) > MAX_SISTERS:
+            raise HTTPException(422, f"at most {MAX_SISTERS} related repositories")
+        ids = [p.sister_repo_id for p in payload]
+        if len(set(ids)) != len(ids):
+            raise HTTPException(422, "a related repository is listed twice")
+        if repo_id in ids:
+            raise HTTPException(422, "a repository cannot be related to itself")
+        async with sf() as session:
+            if await session.get(Repository, repo_id) is None:
+                raise HTTPException(404, "repository not found")
+            sisters = {r.id: r for r in (await session.execute(
+                select(Repository).where(Repository.id.in_(ids)))).scalars().all()} if ids else {}
+            missing = [str(i) for i in ids if i not in sisters]
+            if missing:
+                raise HTTPException(422, f"unknown repository: {', '.join(missing)}")
+            fixed = [p for p in payload if p.branch and p.branch.strip()]
+            if fixed:
+                client = _client()
+                try:
+                    for p in fixed:
+                        sister = sisters[p.sister_repo_id]
+                        if await client.get_branch(sister.gitlab_project_id, p.branch.strip()) is None:
+                            raise HTTPException(
+                                422, f"branch {p.branch.strip()!r} not found in {sister.project_path}")
+                finally:
+                    await client.aclose()
+            await session.execute(delete(RepoSisterLink).where(RepoSisterLink.repo_id == repo_id))
+            for p in payload:
+                session.add(RepoSisterLink(repo_id=repo_id, sister_repo_id=p.sister_repo_id,
+                                           branch=(p.branch or "").strip() or None,
+                                           match_source_branch=p.match_source_branch,
+                                           enabled=p.enabled))
+            await session.commit()
+        return await get_repo_sisters(repo_id)
+
     @router.get("/repositories/{repo_id}/merge-requests",
                response_model=PaginatedMergeRequests)
     async def list_mrs(repo_id: uuid.UUID, state: str | None = None,
@@ -431,6 +560,8 @@ def create_app(settings: Settings | None = None,
         page = max(page, 1)
         per_page = min(per_page, 200)
         async with sf() as session:
+            repo = await session.get(Repository, repo_id)
+            stale_after_days = repo.stale_mr_after_days if repo else 30
             filters = [MergeRequest.repo_id == repo_id]
             if state is not None:
                 filters.append(MergeRequest.state == state)
@@ -453,6 +584,19 @@ def create_app(settings: Settings | None = None,
                 for mr_id, disposition, count in disp_rows:
                     disposition_totals.setdefault(mr_id, {})[disposition] = count
 
+            # Last commit per MR (newest mr_versions row), used to flag an
+            # open MR nobody has pushed to in stale_after_days as stale --
+            # the same signal and threshold the poller uses to stop sweeping
+            # abandoned MRs on every reconciliation cycle.
+            last_commit_at: dict[uuid.UUID, datetime] = {}
+            if mr_ids:
+                version_rows = (await session.execute(
+                    select(MRVersion.mr_id, func.max(MRVersion.version_created_at))
+                    .where(MRVersion.mr_id.in_(mr_ids))
+                    .group_by(MRVersion.mr_id))).all()
+                last_commit_at = {mr_id: ts for mr_id, ts in version_rows if ts is not None}
+            stale_cutoff = datetime.now(timezone.utc) - timedelta(days=stale_after_days)
+
             def _bucket_counts(mr_id: uuid.UUID) -> tuple[int, int, int]:
                 totals = disposition_totals.get(mr_id, {})
                 accepted = sum(totals.get(d, 0) for d in ACCEPTED)
@@ -464,12 +608,15 @@ def create_app(settings: Settings | None = None,
             items = []
             for m, u in rows:
                 accepted, rejected, leftover = _bucket_counts(m.id)
+                commit_at = last_commit_at.get(m.id)
+                is_stale = (m.state == "opened" and commit_at is not None
+                           and commit_at < stale_cutoff)
                 items.append(MergeRequestOut(
                     id=m.id, mr_iid=m.mr_iid, title=m.title, state=m.state,
                     author_username=u, web_url=m.web_url,
                     mr_updated_at=m.mr_updated_at,
                     accepted_count=accepted, rejected_count=rejected,
-                    leftover_count=leftover))
+                    leftover_count=leftover, is_stale=is_stale))
 
             state_totals = dict((await session.execute(
                 select(MergeRequest.state, func.count(MergeRequest.id))
@@ -832,8 +979,10 @@ def create_app(settings: Settings | None = None,
                             mode=payload.mode, publish=payload.publish)
             session.add(review)
             await session.flush()
+            # pinned = the caller chose the endpoint, so no worker may re-route this review.
+            pinned = payload.llm_endpoint_id is not None or proxy_url is not None
             job = await enqueue(session, "review",
-                                {"review_id": str(review.id)},
+                                {"review_id": str(review.id), "pinned": pinned},
                                 # Dry runs get their own key so a benchmarking
                                 # pass is never blocked by (and never blocks)
                                 # a real review of the same MR. The publishing
@@ -1047,6 +1196,17 @@ def create_app(settings: Settings | None = None,
 
     _VALID_KINDS = {"guidance", "do_not_suggest", "missed_pattern"}
     _VALID_STATUSES = {"active", "archived"}
+    _VALID_SCOPES = {"global", "repo"}
+
+    def _validate_learning_query(*, kind, kind_not=None, status, status_not=None, scope):
+        for k in (kind, kind_not):
+            if k is not None and k not in _VALID_KINDS:
+                raise HTTPException(422, f"kind must be one of {sorted(_VALID_KINDS)}")
+        for s in (status, status_not):
+            if s is not None and s not in _VALID_STATUSES:
+                raise HTTPException(422, f"status must be one of {sorted(_VALID_STATUSES)}")
+        if scope is not None and scope not in _VALID_SCOPES:
+            raise HTTPException(422, f"scope must be one of {sorted(_VALID_SCOPES)}")
 
     def _learning_out(l: Learning, mr: MergeRequest | None, actor: Actor | None) -> LearningOut:
         return LearningOut(
@@ -1067,17 +1227,41 @@ def create_app(settings: Settings | None = None,
 
     @router.get("/learnings", response_model=PaginatedLearnings)
     async def get_learnings(repo_id: uuid.UUID | None = None,
-                            kind: str | None = None, status: str | None = None,
+                            scope: str | None = None,
+                            kind: str | None = None, kind_not: str | None = None,
+                            status: str | None = None, status_not: str | None = None,
+                            groundedness_min: float | None = None,
+                            groundedness_max: float | None = None,
+                            audited: bool | None = None,
+                            hit_count_min: int | None = None,
+                            harmful_count_min: int | None = None,
+                            miss_count_min: int | None = None,
+                            no_verdicts: bool | None = None,
+                            strength_min: float | None = None,
+                            strength_max: float | None = None,
+                            created_after: datetime | None = None,
+                            created_before: datetime | None = None,
+                            mr_iid: int | None = None,
+                            learned_from_username: str | None = None,
                             page: int = 1, per_page: int = 50):
-        if kind is not None and kind not in _VALID_KINDS:
-            raise HTTPException(422, f"kind must be one of {sorted(_VALID_KINDS)}")
-        if status is not None and status not in _VALID_STATUSES:
-            raise HTTPException(422, f"status must be one of {sorted(_VALID_STATUSES)}")
+        _validate_learning_query(kind=kind, kind_not=kind_not, status=status,
+                                 status_not=status_not, scope=scope)
+        if scope == "repo" and repo_id is None:
+            raise HTTPException(422, "scope='repo' requires repo_id")
         page = max(page, 1)
         per_page = min(per_page, 200)
         async with sf() as session:
-            rows, total = await list_learnings(session, repo_id=repo_id, kind=kind,
-                                               status=status, page=page, per_page=per_page)
+            rows, total = await list_learnings(
+                session, repo_id=repo_id, scope=scope, kind=kind, kind_not=kind_not,
+                status=status, status_not=status_not,
+                groundedness_min=groundedness_min, groundedness_max=groundedness_max,
+                audited=audited, hit_count_min=hit_count_min,
+                harmful_count_min=harmful_count_min, miss_count_min=miss_count_min,
+                no_verdicts=no_verdicts, strength_min=strength_min,
+                strength_max=strength_max, created_after=created_after,
+                created_before=created_before, mr_iid=mr_iid,
+                learned_from_username=learned_from_username,
+                page=page, per_page=per_page)
             return PaginatedLearnings(
                 items=[_learning_out(l, mr, actor) for l, mr, actor in rows],
                 total=total, page=page, per_page=per_page)
@@ -1136,14 +1320,46 @@ def create_app(settings: Settings | None = None,
 
     @router.get("/learnings/search", response_model=PaginatedLearnings)
     async def search_learnings_route(q: str, repo_id: uuid.UUID | None = None,
+                                     scope: str | None = None,
+                                     kind: str | None = None, kind_not: str | None = None,
+                                     status: str | None = None, status_not: str | None = None,
+                                     groundedness_min: float | None = None,
+                                     groundedness_max: float | None = None,
+                                     audited: bool | None = None,
+                                     hit_count_min: int | None = None,
+                                     harmful_count_min: int | None = None,
+                                     miss_count_min: int | None = None,
+                                     no_verdicts: bool | None = None,
+                                     strength_min: float | None = None,
+                                     strength_max: float | None = None,
+                                     created_after: datetime | None = None,
+                                     created_before: datetime | None = None,
+                                     mr_iid: int | None = None,
+                                     learned_from_username: str | None = None,
                                      page: int = 1, per_page: int = 20):
         if not q.strip():
             raise HTTPException(422, "q must not be empty")
+        _validate_learning_query(kind=kind, kind_not=kind_not, status=status,
+                                 status_not=status_not, scope=scope)
+        if scope == "repo" and repo_id is None:
+            raise HTTPException(422, "scope='repo' requires repo_id")
         page = max(page, 1)
         per_page = min(per_page, 200)
+        # Unlike /learnings, an unset status here keeps the historical
+        # active-only default rather than searching every status.
+        search_status = status if status is not None else "active"
         async with sf() as session:
-            rows, total = await search_learnings(session, settings, query_text=q,
-                                                 repo_id=repo_id, page=page, per_page=per_page)
+            rows, total = await search_learnings(
+                session, settings, query_text=q, repo_id=repo_id, scope=scope,
+                kind=kind, kind_not=kind_not, status=search_status, status_not=status_not,
+                groundedness_min=groundedness_min, groundedness_max=groundedness_max,
+                audited=audited, hit_count_min=hit_count_min,
+                harmful_count_min=harmful_count_min, miss_count_min=miss_count_min,
+                no_verdicts=no_verdicts, strength_min=strength_min,
+                strength_max=strength_max, created_after=created_after,
+                created_before=created_before, mr_iid=mr_iid,
+                learned_from_username=learned_from_username,
+                page=page, per_page=per_page)
             return PaginatedLearnings(
                 items=[_learning_out(l, mr, actor) for l, mr, actor in rows],
                 total=total, page=page, per_page=per_page)
@@ -1177,6 +1393,7 @@ def create_app(settings: Settings | None = None,
                 llm_cfg = await resolve_llm_config(session, None, None)
             except ValueError as e:
                 raise HTTPException(422, f"no LLM endpoint configured: {e}")
+            llm_cfg.timeout = eff.review_llm_timeout_s
             run = AuditRun(repo_id=repo_id, status="running",
                            started_at=datetime.now(timezone.utc))
             session.add(run)
@@ -1298,13 +1515,42 @@ def create_app(settings: Settings | None = None,
             await session.commit()
         return {"ok": True}
 
+    @router.get("/me", response_model=MeOut)
+    async def get_me(principal: Principal = Depends(require_user)):
+        return MeOut(role=principal.role, label=principal.label)
+
     @router.get("/stats/dashboard", response_model=DashboardStatsOut)
     async def get_dashboard_stats(days: int = 14):
         days = max(1, min(days, 90))
         async with sf() as session:
             return await compute_dashboard_stats(session, days)
 
+    @admin_router.get("/stats/tat", response_model=TATStatsOut)
+    async def get_tat_stats():
+        async with sf() as session:
+            return await compute_tat_stats(session)
+
+    @admin_router.get("/stats/users", response_model=UserStatsListOut)
+    async def get_user_stats(days: int | None = None):
+        if days is not None:
+            days = max(1, min(days, 90))
+        async with sf() as session:
+            return await compute_user_stats(session, days)
+
+    @admin_router.get("/stats/comment-sources", response_model=CommentSourceStatsOut)
+    async def get_comment_source_stats(days: int | None = None):
+        if days is not None:
+            days = max(1, min(days, 90))
+        async with sf() as session:
+            return await compute_comment_source_stats(session, days)
+
+    @admin_router.get("/stats/reviewer-graph", response_model=ReviewerGraphOut)
+    async def get_reviewer_graph():
+        async with sf() as session:
+            return await compute_reviewer_graph(session)
+
     app.include_router(router)
+    app.include_router(admin_router)
     return app
 
 

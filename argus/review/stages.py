@@ -559,11 +559,19 @@ class _DynamicMaxTokens(AgentMiddleware):
     ContextBudgetExceeded pre-flight."""
 
     def __init__(self, context_window: int, output_margin: int,
-                 min_output_tokens: int = 512):
+                 min_output_tokens: int = 512,
+                 max_output_tokens: int | None = None):
         super().__init__()
         self.context_window = context_window
         self.output_margin = output_margin
         self.min_output_tokens = min_output_tokens
+        # A provider-imposed ceiling on the OUTPUT length itself, independent
+        # of the context-window budget below -- e.g. Groq rejects
+        # max_tokens > 16384 on this model even when input + output together
+        # are well within its real (131072) context window. Shrinking
+        # context_window instead would incorrectly also restrict how much
+        # INPUT is allowed.
+        self.max_output_tokens = max_output_tokens
 
     def _input_tokens(self, request) -> int:
         import litellm
@@ -587,6 +595,8 @@ class _DynamicMaxTokens(AgentMiddleware):
                 f"{self.context_window} with output_margin {self.output_margin}: "
                 f"only {available} tokens left for output, need at least "
                 f"{self.min_output_tokens}. The request was not sent.")
+        if self.max_output_tokens is not None:
+            available = min(available, self.max_output_tokens)
         return available
 
     async def awrap_model_call(self, request, handler):
@@ -927,13 +937,15 @@ async def run_stage_agent(model, tools: list, system_prompt: str, user_msg: str,
                           callbacks: list | None = None,
                           metadata: dict | None = None,
                           context_window: int = 130_000,
-                          output_margin: int = 4_000):
+                          output_margin: int = 4_000,
+                          max_output_tokens: int | None = None):
     from langchain.agents import create_agent
     agent = create_agent(
         model, tools, system_prompt=system_prompt,
         response_format=response_model,
         middleware=[_ToolErrorGuard(),
-                    _DynamicMaxTokens(context_window, output_margin),
+                    _DynamicMaxTokens(context_window, output_margin,
+                                      max_output_tokens=max_output_tokens),
                     _RoundBudget(max_rounds),
                     _ToolCallMemory()])
     config = {"recursion_limit": recursion_limit_for(max_rounds),

@@ -17,11 +17,23 @@ def _run(args: list[str], cwd: Path | None = None) -> None:
             f"{' '.join(args)} failed (exit {e.returncode}): {detail}") from e
 
 
+# Process-wide, keyed by repo root: every job builds its own WorkspaceManager for the same repo.
+_repo_locks: dict[str, asyncio.Lock] = {}
+# How many live jobs hold each worktree; a review and a distill of one sha share the same folder.
+_worktree_users: dict[str, int] = {}
+
+
+def _repo_lock(root: Path) -> asyncio.Lock:
+    return _repo_locks.setdefault(str(root.resolve()), asyncio.Lock())
+
+
 class WorkspaceManager:
     def __init__(self, root: Path, clone_url: str):
         self.root = Path(root)
         self.clone_url = clone_url
         self.bare = self.root / "bare.git"
+        # Worktrees this instance acquired, so a release after a failed acquire can't drop another job's hold.
+        self._held: set[str] = set()
 
     async def acquire(self, sha: str, mr_iid: int | None = None) -> Path:
         def _sync() -> Path:
@@ -29,6 +41,14 @@ class WorkspaceManager:
             if not self.bare.exists():
                 _run(["git", "clone", "--bare", self.clone_url, str(self.bare)])
             else:
+                # clone_url carries a freshly-built credential (see call sites),
+                # but origin's URL is otherwise only ever set at clone time --
+                # a bare repo cloned before a token rotation would keep
+                # fetching with the stale credential baked into its own
+                # config forever. Re-pointing origin here before every fetch
+                # keeps existing workspaces in sync with the current token.
+                _run(["git", "remote", "set-url", "origin", self.clone_url],
+                     cwd=self.bare)
                 _run(["git", "fetch", "origin", "+refs/heads/*:refs/heads/*"],
                      cwd=self.bare)
             if mr_iid is not None:
@@ -59,7 +79,14 @@ class WorkspaceManager:
                 _run(["git", "worktree", "add", "--detach", str(wt), sha],
                      cwd=self.bare)
             return wt
-        return await asyncio.to_thread(_sync)
+        # Concurrent git fetch/worktree ops on one bare repo fail on ref locks, so serialize per repo.
+        async with _repo_lock(self.root):
+            wt = await asyncio.to_thread(_sync)
+            key = str(wt.resolve())
+            if key not in self._held:
+                self._held.add(key)
+                _worktree_users[key] = _worktree_users.get(key, 0) + 1
+        return wt
 
     async def release(self, sha: str) -> None:
         def _sync() -> None:
@@ -67,4 +94,12 @@ class WorkspaceManager:
             if wt.exists():
                 _run(["git", "worktree", "remove", "--force", str(wt)],
                      cwd=self.bare)
-        await asyncio.to_thread(_sync)
+        async with _repo_lock(self.root):
+            key = str((self.root / f"wt-{sha[:12]}").resolve())
+            if key in self._held:
+                self._held.discard(key)
+                _worktree_users[key] = _worktree_users.get(key, 1) - 1
+            if _worktree_users.get(key, 0) > 0:
+                return
+            _worktree_users.pop(key, None)
+            await asyncio.to_thread(_sync)

@@ -31,6 +31,13 @@ EDITABLE_KEYS: dict[str, type] = {
     "langfuse_enabled": bool, "langfuse_host": str,
     "audit_enabled": bool, "audit_interval_days": int,
     "audit_max_clusters": int, "audit_auto_apply": bool,
+    "followup_mode": str,
+    "chunk_token_budget": int,
+}
+
+# String settings restricted to a fixed set of values.
+EDITABLE_CHOICES: dict[str, tuple[str, ...]] = {
+    "followup_mode": ("off", "reply_only", "resolve"),
 }
 
 # Integer settings with a meaningful floor. A value below this could break
@@ -54,6 +61,7 @@ EDITABLE_MINIMUMS: dict[str, int] = {
     "model_output_margin": 0,
     "audit_interval_days": 1,
     "audit_max_clusters": 1,
+    "chunk_token_budget": 0,
 }
 
 
@@ -72,6 +80,10 @@ def _check(key: str, value):
             raise ValueError(f"{key} expects an integer")
     elif not isinstance(value, expected):
         raise ValueError(f"{key} expects {expected.__name__}")
+
+    choices = EDITABLE_CHOICES.get(key)
+    if choices is not None and value not in choices:
+        raise ValueError(f"{key} must be one of {', '.join(choices)}")
 
     minimum = EDITABLE_MINIMUMS.get(key)
     if minimum is not None and value < minimum:

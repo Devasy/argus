@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import (BigInteger, Boolean, CheckConstraint, Float, ForeignKey,
+from sqlalchemy import (BigInteger, Boolean, CheckConstraint, Float, ForeignKey, Index,
                         Integer, Text, UniqueConstraint, func, text)
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -37,6 +37,8 @@ class Repository(Base):
     default_branch: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     poll_interval_s: Mapped[int] = mapped_column(Integer, default=120)
+    stale_mr_after_days: Mapped[int] = mapped_column(Integer, default=30)
+    learnings_cooldown_hours: Mapped[int] = mapped_column(Integer, default=72)
     default_profile_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("reviewer_profiles.id"))
     poll_cursor: Mapped[dict | None] = mapped_column(JSONB)
@@ -94,9 +96,9 @@ class MRVersion(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     mr_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("merge_requests.id"))
     provider_version_id: Mapped[int] = mapped_column(BigInteger)
-    head_commit_sha: Mapped[str] = mapped_column(Text)
+    head_commit_sha: Mapped[str | None] = mapped_column(Text)
     base_commit_sha: Mapped[str | None] = mapped_column(Text)
-    start_commit_sha: Mapped[str] = mapped_column(Text)
+    start_commit_sha: Mapped[str | None] = mapped_column(Text)
     version_created_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
 
 
@@ -139,7 +141,7 @@ class Note(Base):
         CheckConstraint(
             "disposition IN ('open','accepted','accepted_manually','answered',"
             "'rejected_with_rationale','dismissed_ambiguous','resolved_no_answer',"
-            "'replied_unclassified')",
+            "'replied_unclassified','accepted_by_followup')",
             name="note_disposition_check"),
     )
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -221,6 +223,27 @@ class ReviewerAgentRepoSetting(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class RepoSisterLink(Base):
+    """Opt-in read access from reviews of `repo_id` to a related repo, as reference only.
+
+    Branch rule (match_source_branch on): a sister branch named like the MR's source branch, then
+    like its target branch; else `branch`, else the sister's default. No rows = no sister access.
+    """
+    __tablename__ = "repo_sister_links"
+    __table_args__ = (UniqueConstraint("repo_id", "sister_repo_id"),
+                      CheckConstraint("repo_id <> sister_repo_id", name="sister_not_self_check"),
+                      Index("ix_repo_sister_links_repo", "repo_id"))
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repositories.id", ondelete="CASCADE"))
+    sister_repo_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("repositories.id", ondelete="CASCADE"))
+    branch: Mapped[str | None] = mapped_column(Text)
+    match_source_branch: Mapped[bool] = mapped_column(Boolean, default=True,
+                                                      server_default=text("true"))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    created_at: Mapped[datetime] = _now()
+
+
 class ReviewerAgentVersion(Base):
     __tablename__ = "reviewer_agent_versions"
     __table_args__ = (UniqueConstraint("agent_id", "version"),)
@@ -250,7 +273,7 @@ class LLMEndpoint(Base):
     __tablename__ = "llm_endpoints"
     __table_args__ = (
         CheckConstraint(
-            "provider IN ('anthropic','openai','gemini','ollama','claude_cli_proxy')",
+            "provider IN ('anthropic','openai','gemini','ollama','claude_cli_proxy','groq')",
             name="endpoint_provider_check"),
     )
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -261,6 +284,11 @@ class LLMEndpoint(Base):
     model: Mapped[str] = mapped_column(Text)
     tool_calling_native: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # A second llm_endpoints row to fail over to (litellm's own fallbacks=
+    # mechanism, wired in llm/factory.py) -- e.g. a hosted endpoint falling
+    # back to the local llama.cpp one on a rate limit or outage.
+    fallback_endpoint_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("llm_endpoints.id"))
 
 
 class ReviewerProxy(Base):
@@ -316,6 +344,8 @@ class Review(Base):
     error: Mapped[str | None] = mapped_column(Text)
     force_agents: Mapped[list | None] = mapped_column(JSONB)
     incremental_files: Mapped[list | None] = mapped_column(JSONB)
+    # Sister repos this review could read: [{name, branch, sha, why}] or [{name, error}].
+    sister_context: Mapped[list | None] = mapped_column(JSONB)
     langfuse_trace_id: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
@@ -623,7 +653,7 @@ class FileKnowledge(Base):
 class Feedback(Base):
     __tablename__ = "feedback"
     __table_args__ = (
-        CheckConstraint("kind IN ('reply','applied','reaction','resolved','ui_answer')",
+        CheckConstraint("kind IN ('reply','applied','reaction','resolved','ui_answer','followup')",
                         name="feedback_kind_check"),
     )
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -655,6 +685,12 @@ class Job(Base):
     payload: Mapped[dict] = mapped_column(JSONB)
     dedup_key: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, default="queued")
+    # Lower runs first. A bulk enqueue of one kind (194 distill_mr jobs queued
+    # ahead of 14 review jobs, 2026-09) starved the other kind indefinitely
+    # under pure FIFO, since claim_next only ever looked at Job.created_at.
+    # See jobs/queue.py's PRIORITY_* constants for the actual ordering.
+    priority: Mapped[int] = mapped_column(Integer, default=100,
+                                          server_default="100")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_by: Mapped[str | None] = mapped_column(Text)
     locked_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
