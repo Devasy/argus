@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { ClipboardList, ExternalLink, Play } from "lucide-react";
-import ReactMarkdown from "react-markdown";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../../api/client";
 import {
@@ -9,37 +8,14 @@ import {
   useProxies,
   useReconcileAndDistill,
 } from "../../api/queries";
-import type { Note } from "../../api/types";
 import BenchmarkBadge from "../../components/BenchmarkBadge";
+import type { Thread } from "../../api/types";
 import ErrorBox from "../../components/ErrorBox";
 import Modal from "../../components/Modal";
 import StatusBadge from "../../components/StatusBadge";
+import ThreadCard from "../../components/ThreadCard";
+import Toggle from "../../components/Toggle";
 import { fmtTokens } from "../../lib/pipelineGraph";
-
-function NoteCard({ note }: { note: Note }) {
-  return (
-    <div className="ui-card section">
-      <div className="flex-between">
-        <div className="row">
-          <strong>{note.author_username ?? "unknown"}</strong>
-          <span className="badge" data-kind={note.kind}>
-            {note.author_type === "bot" ? "bot" : "human"} · {note.kind}
-          </span>
-          {note.disposition !== "open" && <StatusBadge status="done" label={note.disposition} />}
-        </div>
-        {note.file_path && (
-          <span className="muted mono">
-            {note.file_path}
-            {note.line != null ? `:${note.line}` : ""}
-          </span>
-        )}
-      </div>
-      <div className="md-body">
-        <ReactMarkdown>{note.body}</ReactMarkdown>
-      </div>
-    </div>
-  );
-}
 
 function TriggerDialog({ mrId, onClose }: { mrId: string; onClose: () => void }) {
   const proxies = useProxies();
@@ -107,6 +83,40 @@ function TriggerDialog({ mrId, onClose }: { mrId: string; onClose: () => void })
   );
 }
 
+function ThreadsSection({
+  threads,
+  onlyBot,
+  onOnlyBotChange,
+}: {
+  threads: Thread[];
+  onlyBot: boolean;
+  onOnlyBotChange: (v: boolean) => void;
+}) {
+  const shown = onlyBot ? threads.filter((t) => t.has_bot_comment) : threads;
+  return (
+    <>
+      <div className="flex-between section">
+        <h3 style={{ margin: 0 }}>Discussion threads</h3>
+        <div className="row" style={{ gap: 8 }}>
+          <span className="muted">Only threads with bot findings</span>
+          <Toggle
+            checked={onlyBot}
+            onChange={onOnlyBotChange}
+            label="Only threads with bot findings"
+          />
+          <span className="muted" aria-live="polite">
+            Showing {shown.length} of {threads.length} threads
+          </span>
+        </div>
+      </div>
+      {threads.length === 0 && <div className="muted">No discussion threads synced yet.</div>}
+      {shown.map((t) => (
+        <ThreadCard key={t.discussion_id} thread={t} />
+      ))}
+    </>
+  );
+}
+
 export default function MRDetail() {
   const { mrId } = useParams<{ mrId: string }>();
   const navigate = useNavigate();
@@ -116,6 +126,7 @@ export default function MRDetail() {
   const [learningsMessage, setLearningsMessage] = useState<string | null>(null);
   const [triggeringQa, setTriggeringQa] = useState(false);
   const [qaError, setQaError] = useState<string | null>(null);
+  const [onlyBotThreads, setOnlyBotThreads] = useState(true);
 
   const doTriggerQaScenarios = async () => {
     setQaError(null);
@@ -134,9 +145,9 @@ export default function MRDetail() {
     try {
       const result = await reconcileAndDistill.mutateAsync(mrId!);
       setLearningsMessage(
-        result.queued_run
-          ? `Learning run queued (${result.note_count} note${result.note_count === 1 ? "" : "s"})`
-          : "No new candidates found",
+        result.queued_runs > 0
+          ? `Learning run${result.queued_runs === 1 ? "" : "s"} queued (${result.queued_runs})`
+          : "No settled threads with new human replies",
       );
     } catch {
       /* error surfaced via reconcileAndDistill.error */
@@ -294,13 +305,11 @@ export default function MRDetail() {
             </div>
           )}
 
-          <h3 className="section">Discussion notes ({detail.data.notes.length})</h3>
-          {detail.data.notes.length === 0 && (
-            <div className="muted">No notes synced for this MR yet.</div>
-          )}
-          {detail.data.notes.map((note) => (
-            <NoteCard key={note.id} note={note} />
-          ))}
+          <ThreadsSection
+            threads={detail.data.threads}
+            onlyBot={onlyBotThreads}
+            onOnlyBotChange={setOnlyBotThreads}
+          />
         </>
       )}
 

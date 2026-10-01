@@ -8,6 +8,7 @@ import {
   chunkNodeStatus,
   discoverAgentNames,
   discoverChunkIds,
+  discoverVerifyBranches,
   filterTraceForNode,
   groupBounds,
   specialistLabel,
@@ -110,6 +111,16 @@ describe("specialistLabel", () => {
 
   it("splits only on the first colon (agent names could theoretically contain none, chunk ids can)", () => {
     expect(specialistLabel("security:c1a")).toEqual({ agent: "security", chunkId: "c1a" });
+  });
+
+  it("parses verify's delegated sub-agent stages", () => {
+    // build_verify_delegate_tool records "verify_delegate:<n>" specifically so
+    // each delegated investigation renders as its own node. The backend relies
+    // on this parse; renaming either side silently hides those runs.
+    expect(specialistLabel("verify_delegate:1")).toEqual({
+      agent: "verify_delegate",
+      chunkId: "1",
+    });
   });
 });
 
@@ -281,8 +292,103 @@ describe("chunkNodeStatus", () => {
     expect(chunkNodeStatus("c1", withError, stage("analyze", "failed"))).toBe("failed");
   });
 
-  it("is pending when aggregate analyze stage record is missing entirely", () => {
-    expect(chunkNodeStatus("c1", t, undefined)).toBe("pending");
+  it("is running when it has activity but the aggregate analyze row doesn't exist yet", () => {
+    // Stage rows are only written on completion, so mid-review there is no
+    // analyze row at all -- a working chunk used to read as pending.
+    expect(chunkNodeStatus("c1", t, undefined)).toBe("running");
+  });
+
+  it("is done from its own row even while the aggregate analyze row is missing", () => {
+    expect(chunkNodeStatus("c1", t, undefined, stage("analyze:c1", "done"))).toBe("done");
+  });
+
+  it("is failed from its own failed row", () => {
+    expect(chunkNodeStatus("c1", t, undefined, stage("analyze:c1", "failed"))).toBe("failed");
+  });
+});
+
+describe("verify fan-out", () => {
+  const round = (s: string, error: string | null = null) => ({
+    stage: s,
+    seq: 1,
+    prompt_tokens: 1,
+    completion_tokens: 1,
+    latency_ms: 1,
+    error,
+  });
+
+  it("predicts one pending branch per chunk with findings, plus whole-mr for untagged ones", () => {
+    const stages: ReviewStage[] = [
+      stage("scout", "done"),
+      stage("analyze", "done", { produced: 5, produced_by_chunk: { c1: 0, c2: 1, c3: 2 } }),
+    ];
+    expect(discoverVerifyBranches(stages, trace())).toEqual(["c2", "c3", "whole-mr"]);
+    const nodes = buildGraphNodes(stages, trace());
+    const branches = nodes.filter((n) => n.kind === "verify-branch");
+    expect(branches.map((n) => n.status)).toEqual(["pending", "pending", "pending"]);
+    expect(branches.map((n) => n.label)).toEqual(["verify (c2)", "verify (c3)", "verify (whole-mr)"]);
+  });
+
+  it("predicts nothing before analyze finishes", () => {
+    expect(discoverVerifyBranches([stage("analyze", "running")], trace())).toEqual([]);
+  });
+
+  it("places branches and delegates between the verify gate and publish, not in the analyze fan-out", () => {
+    const stages: ReviewStage[] = [
+      stage("scout", "done"),
+      stage("analyze", "done", { produced: 1, produced_by_chunk: { c2: 1 } }),
+      stage("verify_delegate:1", "done"),
+    ];
+    const nodes = buildGraphNodes(stages, trace());
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    expect(byId.get("verify")!.layer).toBe(3);
+    expect(byId.get("verify:c2")!.layer).toBe(4);
+    expect(byId.get("verify_delegate:1")!.layer).toBe(4);
+    expect(byId.get("verify_delegate:1")!.kind).toBe("verify-delegate");
+    expect(byId.get("publish")!.layer).toBe(5);
+    expect(nodes.filter((n) => n.kind === "agent")).toEqual([]);
+
+    const edges = toElkGraph(nodes).edges.map((e) => e.id);
+    expect(edges).toContain("e:verify:verify:c2");
+    expect(edges).toContain("e:verify:c2:publish");
+    expect(edges).toContain("e:verify:verify_delegate:1");
+    expect(edges).not.toContain("e:verify:publish");
+  });
+
+  it("branch is running with activity, done from its own row, done once the aggregate verify row lands", () => {
+    const analyze = stage("analyze", "done", { produced: 2, produced_by_chunk: { c1: 1, c2: 1 } });
+    const t = trace({ llm_rounds: [round("verify:c1"), round("verify:c2")] });
+    const live = buildGraphNodes([analyze, stage("verify:c1", "done")], t);
+    expect(live.find((n) => n.id === "verify:c1")!.status).toBe("done");
+    expect(live.find((n) => n.id === "verify:c2")!.status).toBe("running");
+
+    const finished = buildGraphNodes([analyze, stage("verify", "done")], t);
+    expect(finished.find((n) => n.id === "verify:c2")!.status).toBe("done");
+  });
+
+  it("overall verify is running as soon as a branch starts, pending before", () => {
+    const analyze = stage("analyze", "done", { produced: 1, produced_by_chunk: { c1: 1 } });
+    const before = buildGraphNodes([analyze], trace());
+    expect(before.find((n) => n.id === "verify")!.status).toBe("pending");
+    const during = buildGraphNodes([analyze], trace({ llm_rounds: [round("verify:c1")] }));
+    expect(during.find((n) => n.id === "verify")!.status).toBe("running");
+  });
+
+  it("renders retrieval between scout and the analyze fan-out, not as a reviewer agent", () => {
+    const stages: ReviewStage[] = [stage("scout", "done"), stage("retrieval", "done"), stage("design", "done")];
+    const nodes = buildGraphNodes(stages, trace());
+    const retrieval = nodes.find((n) => n.id === "retrieval")!;
+    expect(retrieval.kind).toBe("retrieval");
+    expect(retrieval.layer).toBe(1);
+    const edges = toElkGraph(nodes).edges.map((e) => e.id);
+    expect(edges).toContain("e:scout:retrieval");
+    expect(edges).toContain("e:retrieval:design");
+    expect(edges).not.toContain("e:scout:design");
+  });
+
+  it("does not treat per-chunk analyze rows as agents", () => {
+    const stages: ReviewStage[] = [stage("analyze:c1", "done"), stage("verify:c1", "done")];
+    expect(discoverAgentNames(trace(), stages)).toEqual([]);
   });
 });
 
@@ -379,9 +485,9 @@ describe("buildGraphNodes", () => {
       "publish",
     ]);
     expect(nodes.find((n) => n.id === "scout")!.layer).toBe(0);
-    expect(nodes.find((n) => n.id === "analyze:c1")!.layer).toBe(1);
-    expect(nodes.find((n) => n.id === "verify")!.layer).toBe(2);
-    expect(nodes.find((n) => n.id === "publish")!.layer).toBe(3);
+    expect(nodes.find((n) => n.id === "analyze:c1")!.layer).toBe(2);
+    expect(nodes.find((n) => n.id === "verify")!.layer).toBe(3);
+    expect(nodes.find((n) => n.id === "publish")!.layer).toBe(5);
   });
 
   it("chunk nodes have kind 'chunk', label as bare chunk id, and null durationMs", () => {
@@ -405,7 +511,7 @@ describe("buildGraphNodes", () => {
     expect(nodes.find((n) => n.id === "publish")!.status).toBe("done");
   });
 
-  it("derives a dynamically-named agent stage (e.g. security-reviewer) as an agent node in layer 1 (the bug fix)", () => {
+  it("derives a dynamically-named agent stage (e.g. security-reviewer) as an agent node in the analyze fan-out layer (the bug fix)", () => {
     const withAgent: ReviewStage[] = [
       ...stages,
       stage("security-reviewer", "done", {
@@ -417,7 +523,7 @@ describe("buildGraphNodes", () => {
     const agent = nodes.find((n) => n.id === "security-reviewer");
     expect(agent).toBeDefined();
     expect(agent!.kind).toBe("agent");
-    expect(agent!.layer).toBe(1);
+    expect(agent!.layer).toBe(2);
     expect(agent!.status).toBe("done");
     expect(agent!.durationMs).toBe(5000);
   });
@@ -428,7 +534,7 @@ describe("buildGraphNodes", () => {
     const design = nodes.find((n) => n.id === "design");
     expect(design).toBeDefined();
     expect(design!.kind).toBe("agent");
-    expect(design!.layer).toBe(1);
+    expect(design!.layer).toBe(2);
     expect(design!.status).toBe("done");
   });
 
@@ -445,7 +551,7 @@ describe("buildGraphNodes", () => {
     expect(specialist).toBeDefined();
     expect(specialist!.kind).toBe("agent");
     expect(specialist!.label).toBe("security (c1)");
-    expect(specialist!.layer).toBe(1);
+    expect(specialist!.layer).toBe(2);
     expect(specialist!.status).toBe("done");
     expect(specialist!.durationMs).toBe(3000);
   });
@@ -471,7 +577,7 @@ describe("buildGraphNodes", () => {
     const agent = nodes.find((n) => n.id === "platform-reviewer");
     expect(agent).toBeDefined();
     expect(agent!.kind).toBe("agent");
-    expect(agent!.layer).toBe(1);
+    expect(agent!.layer).toBe(2);
     expect(agent!.status).toBe("failed");
     expect(agent!.durationMs).toBeNull(); // no stage row -> no started_at/finished_at
     expect(agent!.tokens).toBe(5100);
@@ -755,6 +861,19 @@ describe("toElkGraph", () => {
       sources: ["analyze:c2"],
       targets: ["verify"],
     });
+  });
+
+  it("still derives layers from the fixed LAYER map's values, unaffected by the audit pipeline's wider layer range", () => {
+    // toElkGraph now builds layers from the sorted distinct layer values
+    // PRESENT rather than the fixed LAYER map -- for a review graph (whose
+    // layer values are exactly LAYER's own 0..5) that must produce identical
+    // edges to before.
+    const withAgent: ReviewStage[] = [...stages, stage("design", "done")];
+    const nodes = buildGraphNodes(withAgent, trace());
+    const elk = toElkGraph(nodes);
+    expect(elk.edges.map((e) => e.id).sort()).toEqual(
+      ["e:scout:design", "e:design:verify", "e:verify:publish"].sort(),
+    );
   });
 });
 

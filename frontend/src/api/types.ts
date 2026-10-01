@@ -6,6 +6,8 @@ export interface Repository {
   gitlab_project_id: number;
   enabled: boolean;
   poll_interval_s: number;
+  stale_mr_after_days: number;
+  learnings_cooldown_hours: number;
   default_profile_id: string | null;
   auto_review_enabled: boolean;
   mr_count: number;
@@ -22,6 +24,7 @@ export interface MergeRequest {
   accepted_count: number;
   rejected_count: number;
   leftover_count: number;
+  is_stale: boolean;
 }
 
 export interface MergeRequestStateCounts {
@@ -42,7 +45,7 @@ export interface PaginatedMergeRequests {
 export interface Note {
   id: string;
   author_username: string | null;
-  author_type: string; // "human" | "bot"
+  author_type: string; // "bot" (argus) | "human" | "external_bot"
   kind: string; // "inline" | "summary" | ...
   body: string;
   file_path: string | null;
@@ -68,9 +71,40 @@ export interface ReviewSummary {
   publish: boolean;
 }
 
+export interface ThreadNote {
+  id: string;
+  author_username: string | null;
+  author_type: string; // "bot" (argus) | "human" | "external_bot"
+  kind: string;
+  body: string;
+  created_at: string | null;
+  depth: number; // 0 opens the discussion, 1 is a reply
+  disposition: string | null; // bot notes only
+}
+
+export interface CodeEvent {
+  at: string;
+  kind: "line_changed" | "commit";
+  text: string;
+}
+
+export interface Thread {
+  discussion_id: string;
+  resolved: boolean;
+  anchor: string; // "path:line" or "MR-level discussion"
+  has_bot_comment: boolean;
+  notes: ThreadNote[];
+  events: CodeEvent[];
+  disposition: string | null;
+  verdict: string | null;
+  verdict_reason: string | null;
+  gitlab_url: string | null;
+}
+
 export interface MergeRequestDetail {
   mr: MergeRequest;
   notes: Note[];
+  threads: Thread[];
   reviews: ReviewSummary[];
   distillation_runs: DistillationRunSummary[];
 }
@@ -217,6 +251,18 @@ export interface DistillationRunSummary {
   started_at: string | null;
 }
 
+export interface DistillThread {
+  discussion_id: string;
+  thread_type: "bot_thread" | "human_thread";
+  status: "queued" | "done" | "failed";
+  reconciler_label: string | null;
+  reply_verdict: string | null;
+  verdict_reason: string | null;
+  learning_ids: string[];
+  decision_reason: string | null;
+  thread: Thread | null;
+}
+
 export interface DistillationRun {
   id: string;
   mr_id: string;
@@ -228,6 +274,7 @@ export interface DistillationRun {
   finished_at: string | null;
   prompt_tokens: number;
   completion_tokens: number;
+  threads: DistillThread[];
 }
 
 export interface SettingsView {
@@ -279,6 +326,28 @@ export interface ReviewerAgentCreate {
   tool_allowlist?: string[] | null;
 }
 
+export interface LearningsQueryParams {
+  repo_id?: string;
+  scope?: "global" | "repo";
+  kind?: string;
+  kind_not?: string;
+  status?: string;
+  status_not?: string;
+  groundedness_min?: number;
+  groundedness_max?: number;
+  audited?: boolean;
+  hit_count_min?: number;
+  harmful_count_min?: number;
+  miss_count_min?: number;
+  no_verdicts?: boolean;
+  strength_min?: number;
+  strength_max?: number;
+  created_after?: string;
+  created_before?: string;
+  mr_iid?: number;
+  learned_from_username?: string;
+}
+
 export interface Learning {
   id: string;
   repo_id: string | null;
@@ -319,15 +388,22 @@ export type AuditVerdictType =
   | "conflicts_with"
   | "ungrounded";
 
-export type AuditProposedAction = "none" | "archive" | "merge" | "flag_for_rewrite" | "escalate_to_human";
+export type AuditProposedAction =
+  "none" | "archive" | "merge" | "flag_for_rewrite" | "escalate_to_human";
 
 export type AuditVerdictState = "proposed" | "approved" | "rejected" | "applied";
+
+export type AuditRunStatus = "queued" | "running" | "done" | "failed";
 
 export interface AuditRun {
   id: string;
   repo_id: string;
   repo_path: string | null;
-  status: "running" | "done" | "failed";
+  status: AuditRunStatus;
+  trigger: string;
+  /** How many due learnings this run picked; grounded_count counts up as ground fan-out finishes. */
+  planned_count: number;
+  grounded_count: number;
   audited_ref: string | null;
   commit_sha: string | null;
   clusters_examined: number;
@@ -338,6 +414,31 @@ export interface AuditRun {
   started_at: string | null;
   finished_at: string | null;
   created_at: string;
+}
+
+export interface AuditStage {
+  stage_name: string;
+  status: "running" | "done" | "failed";
+  artifact: Record<string, unknown> | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface AuditRunDetail {
+  id: string;
+  repo_id: string;
+  repo_path: string | null;
+  status: AuditRunStatus;
+  trigger: string;
+  planned_count: number;
+  grounded_count: number;
+  verdicts_written: number;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+  langfuse_trace_id: string | null;
+  stages: AuditStage[];
 }
 
 export interface AuditVerdict {
@@ -385,11 +486,112 @@ export interface DashboardTiles {
   human_replies: number;
   accepted: number;
   rejected: number;
+  accepted_by_followup: number;
   acceptance_rate: number | null;
   active_learnings: number;
   pending_distillation: number;
   prompt_tokens: number;
   completion_tokens: number;
+}
+
+export interface QueueKindCount {
+  kind: string;
+  queued: number;
+  running: number;
+}
+
+export interface OpsStats {
+  jobs_by_kind: QueueKindCount[];
+  reviews_queued: number;
+  reviews_running: number;
+  reviews_failed: number;
+  distillation_queued: number;
+  distillation_running: number;
+  distillation_failed: number;
+  audits_running: number;
+  audits_failed: number;
+}
+
+export interface TATMetric {
+  avg_s: number | null;
+  p50_s: number | null;
+  p95_s: number | null;
+  sample_size: number;
+}
+
+export interface TATStats {
+  review: TATMetric;
+  distillation: TATMetric;
+  audit: TATMetric;
+  time_to_first_bot_comment: TATMetric;
+}
+
+export interface UserAuthorStats {
+  accepted: number;
+  rejected: number;
+  open: number;
+}
+
+export interface UserReviewerStats {
+  comments: number;
+  resolved: number;
+  rejected: number;
+  ignored: number;
+}
+
+export interface UserStats {
+  actor_id: string;
+  username: string;
+  display_name: string | null;
+  prs_authored: number;
+  author_stats: UserAuthorStats;
+  reviewer_stats: UserReviewerStats;
+}
+
+export interface UserStatsList {
+  window_days: number | null;
+  items: UserStats[];
+}
+
+export interface ReviewerGraphNode {
+  actor_id: string;
+  username: string;
+  display_name: string | null;
+}
+
+export interface ReviewerGraphEdge {
+  reviewer_id: string;
+  author_id: string;
+  comments: number;
+  resolved: number;
+  rejected: number;
+  ignored: number;
+}
+
+export interface ReviewerGraph {
+  nodes: ReviewerGraphNode[];
+  edges: ReviewerGraphEdge[];
+}
+
+export type Role = "user" | "admin";
+
+export interface Me {
+  role: Role;
+  /** Human-readable only, not a real identity yet -- see api/auth.py. */
+  label: string;
+  permissions: string[];
+}
+
+export interface CommentSourceBucket {
+  resolved: number;
+  rejected: number;
+  ignored: number;
+}
+
+export interface CommentSourceStats {
+  window_days: number | null;
+  bot: CommentSourceBucket;
+  human: CommentSourceBucket;
 }
 
 export interface DashboardDay {
@@ -419,6 +621,7 @@ export interface DashboardActivity {
 export interface DashboardStats {
   window_days: number;
   tiles: DashboardTiles;
+  ops: OpsStats;
   reviews_per_day: DashboardDay[];
   agents: DashboardAgent[];
   activity: DashboardActivity[];
@@ -454,6 +657,18 @@ export interface PaginatedComplaints {
   page: number;
   per_page: number;
   by_target: ComplaintTargetCount[];
+}
+
+export interface RepoSisterLinkIn {
+  sister_repo_id: string;
+  branch: string | null;
+  match_source_branch: boolean;
+  enabled: boolean;
+}
+
+export interface RepoSisterLink extends RepoSisterLinkIn {
+  sister_project_path: string;
+  sister_default_branch: string | null;
 }
 
 export interface RepoAgentSetting {

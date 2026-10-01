@@ -12,6 +12,10 @@ interface Props {
   trace: Trace | null;
   selectedNode: string | null;
   onSelectNode: (nodeId: string | null) => void;
+  // When given, this graph's own nodes -- skips buildGraphNodes (the review
+  // pipeline's stage/trace-shaped node builder), for a differently-shaped
+  // pipeline like the audit run's.
+  specs?: GraphNodeSpec[];
 }
 
 function GroupBackdrop({ data }: { data: { label: string } }) {
@@ -37,33 +41,39 @@ function toFlowNodes(
     draggable: false,
   }));
 
-  const chunkSpecs = specs.filter((s) => s.kind === "chunk");
-  if (chunkSpecs.length === 0) return cardNodes;
-
-  const bounds = groupBounds(
-    chunkSpecs.map((s) => {
-      const pos = positions.get(s.id) ?? { x: 0, y: 0 };
-      return { id: s.id, x: pos.x, y: pos.y, width: NODE_WIDTH, height: NODE_HEIGHT };
-    }),
-  );
-  if (bounds == null) return cardNodes;
-
-  const groupNode: Node = {
-    id: "__group:analyze",
-    type: "groupBackdrop",
-    position: { x: bounds.x, y: bounds.y },
-    style: {
-      width: bounds.width,
-      height: bounds.height,
+  const groups = [
+    { key: "analyze", title: "Analyze", members: specs.filter((s) => s.kind === "chunk") },
+    {
+      key: "verify",
+      title: "Verify",
+      members: specs.filter((s) => s.kind === "verify-branch" || s.kind === "verify-delegate"),
     },
-    className: "pl-group",
-    data: { label: `Analyze · fan-out × ${chunkSpecs.length}` },
-    selectable: false,
-    draggable: false,
-    zIndex: -1,
-  };
+  ];
 
-  return [groupNode, ...cardNodes];
+  const groupNodes: Node[] = [];
+  for (const group of groups) {
+    const bounds = groupBounds(
+      group.members.map((s) => {
+        const pos = positions.get(s.id) ?? { x: 0, y: 0 };
+        return { id: s.id, x: pos.x, y: pos.y, width: NODE_WIDTH, height: NODE_HEIGHT };
+      }),
+    );
+    if (bounds == null) continue;
+    const branchCount = group.members.filter((s) => s.kind !== "verify-delegate").length;
+    groupNodes.push({
+      id: `__group:${group.key}`,
+      type: "groupBackdrop",
+      position: { x: bounds.x, y: bounds.y },
+      style: { width: bounds.width, height: bounds.height },
+      className: "pl-group",
+      data: { label: `${group.title} · fan-out × ${branchCount}` },
+      selectable: false,
+      draggable: false,
+      zIndex: -1,
+    });
+  }
+
+  return [...groupNodes, ...cardNodes];
 }
 
 function toFlowEdges(specs: GraphNodeSpec[], edgeRoutes: Map<string, ElkEdgeRoute>): Edge[] {
@@ -99,8 +109,11 @@ function toFlowEdges(specs: GraphNodeSpec[], edgeRoutes: Map<string, ElkEdgeRout
   });
 }
 
-export default function PipelineGraph({ stages, trace, selectedNode, onSelectNode }: Props) {
-  const specs = useMemo(() => buildGraphNodes(stages, trace), [stages, trace]);
+export default function PipelineGraph({ stages, trace, selectedNode, onSelectNode, specs: givenSpecs }: Props) {
+  const specs = useMemo(
+    () => givenSpecs ?? buildGraphNodes(stages, trace),
+    [givenSpecs, stages, trace],
+  );
 
   // ELK layout only depends on which nodes exist and how they're connected
   // (id/kind/layer), never on status/duration/tokens. Keying the layout
