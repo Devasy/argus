@@ -54,13 +54,9 @@ async def distill_llm_config(session, endpoint_name: str | None):
 
 
 def default_specs(known_kinds: list[str]) -> list[WorkerSpec]:
-    # audit_repo is GPU-2-only and explicit-lane-only by design (see the
-    # audit-pipeline plan): unlike review/distill_mr, an audit left uncovered
-    # is meant to queue safely, never fall onto whatever worker the review/
-    # distill fallback happens to also run on (and its default LLM endpoint,
-    # not GPU 2). Every other kind still falls back to one worker so a typo
-    # can't stop reviews.
-    kinds = tuple(k for k in known_kinds if k != "audit_repo")
+    # In single-worker / default configurations with an empty ARGUS_WORKER_SPECS,
+    # w1 must process all known kinds (including audit_repo) so queued audits are claimed.
+    kinds = tuple(known_kinds)
     return [WorkerSpec(id="w1", kinds=kinds)]
 
 

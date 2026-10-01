@@ -217,6 +217,10 @@ def _search_python(workspace: Path, pattern: str, glob: str,
         except OSError:
             continue
         for i, line in enumerate(lines):
+            if deadline is not None and time.monotonic() > deadline:
+                break
+            if len(line) > 10000:
+                line = line[:10000]
             if not rx.search(line):
                 continue
             lo = max(0, i - context)
@@ -247,5 +251,5 @@ async def search(workspace: Path, pattern: str, glob: str = "",
         # outer bound above ripgrep's own timeout; the review gets control back even if the thread is stuck
         return await asyncio.wait_for(asyncio.to_thread(_sync),
                                       timeout=SEARCH_TIMEOUT_S * 1.5)
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):
         return _timed_out_message()

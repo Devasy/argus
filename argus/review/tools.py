@@ -427,6 +427,16 @@ async def _resolve_learning_id(sf: async_sessionmaker, learning_id: str):
             return full if await s.get(Learning, full) is not None else None
         if not re.fullmatch(r"[0-9a-f]{8}[0-9a-f-]*", ref):
             return None
+        hex_only = ref.replace("-", "")
+        if len(hex_only) <= 32:
+            try:
+                min_uuid = _uuid.UUID(hex_only.ljust(32, "0"))
+                max_uuid = _uuid.UUID(hex_only.ljust(32, "f"))
+                hits = (await s.execute(select(Learning.id).where(
+                    Learning.id >= min_uuid, Learning.id <= max_uuid).limit(2))).scalars().all()
+                return hits[0] if len(hits) == 1 else None
+            except ValueError:
+                pass
         hits = (await s.execute(select(Learning.id).where(
             cast(Learning.id, SAText).like(f"{ref}%")).limit(2))).scalars().all()
     return hits[0] if len(hits) == 1 else None

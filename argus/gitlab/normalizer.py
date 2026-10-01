@@ -28,16 +28,18 @@ def classify_system_note(body: str) -> str | None:
     return None
 
 
-# People sign in as fname.lname (developer.one too); every other account is a token or another bot.
-# The migration that re-filed existing notes (b4f8d6f470df) uses this same pattern.
-HUMAN_USERNAME = re.compile(r"^[a-z]+(\.[a-z]+)+[0-9]*$")
+# Detect GitLab token bots (e.g. project_123_bot_456, group_123_bot_456) or explicit bot usernames.
+TOKEN_BOT_USERNAME = re.compile(r"^(project|group)_\d+_bot_[0-9a-zA-Z]+$|.*[-_]bot$|^bot[-_].*", re.IGNORECASE)
 
 
 def classify_author(username: str, bot_usernames: set[str]) -> str:
     """argus itself is "bot"; another review bot is "external_bot", kept out of human learning."""
-    if username in bot_usernames:
+    u = username or ""
+    if u in bot_usernames:
         return "bot"
-    return "human" if HUMAN_USERNAME.match(username or "") else "external_bot"
+    if TOKEN_BOT_USERNAME.match(u):
+        return "external_bot"
+    return "human"
 
 
 def _ts(value: str | None) -> datetime | None:

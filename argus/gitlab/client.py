@@ -14,8 +14,9 @@ class GitLabClient:
             base_url=base_url.rstrip("/") + "/api/v4",
             headers={"PRIVATE-TOKEN": token},
             # retries re-attempt only a failed connect (e.g. a DNS blip), never a sent request
-            transport=httpx.AsyncHTTPTransport(verify=ssl_verify, retries=2),
+            transport=httpx.AsyncHTTPTransport(verify=ssl_verify, retries=2, trust_env=True),
             timeout=30.0,
+            trust_env=True,
         )
 
     async def aclose(self) -> None:

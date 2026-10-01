@@ -306,9 +306,12 @@ async def sweep_pending_threads(session: AsyncSession, repo, now: datetime, *,
                or_(lt.id.is_(None),
                    and_(lt.status == "failed", lt.attempts < MAX_THREAD_ATTEMPTS),
                    and_(lt.status == "queued",
-                        lt.updated_at < now - timedelta(hours=STALE_QUEUED_HOURS)),
+                        lt.updated_at < now - timedelta(hours=STALE_QUEUED_HOURS),
+                        lt.attempts < MAX_THREAD_ATTEMPTS),
                    Note.note_created_at > lt.updated_at))
-        .distinct().limit(SWEEP_MR_LIMIT))).scalars().all()
+        .group_by(MergeRequest.id)
+        .order_by(func.min(Note.note_created_at))
+        .limit(SWEEP_MR_LIMIT))).scalars().all()
     jobs = 0
     for mr_id in mr_ids:
         mr = await session.get(MergeRequest, mr_id)

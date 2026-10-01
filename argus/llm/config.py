@@ -59,6 +59,7 @@ async def resolve_llm_config(session: AsyncSession,
         fb = await session.get(LLMEndpoint, ep.fallback_endpoint_id)
         if fb is not None:
             fallback = {
+                "provider": fb.provider,
                 "model": fb.model, "api_base": fb.base_url,
                 "api_key": os.environ.get(fb.api_key_ref) if fb.api_key_ref else None,
             }

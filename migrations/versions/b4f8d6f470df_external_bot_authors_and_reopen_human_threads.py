@@ -25,7 +25,7 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 # Same pattern as argus.gitlab.normalizer.HUMAN_USERNAME.
-_HUMAN = r"^[a-z]+(\.[a-z]+)+[0-9]*$"
+_TOKEN_BOT = r"^((project|group)_[0-9]+_bot_[0-9a-zA-Z]+|.*[-_]bot$|^bot[-_].*)"
 
 
 def _check(values: str) -> None:
@@ -44,7 +44,7 @@ def upgrade() -> None:
     op.execute(f"""
         UPDATE argus.notes n SET author_type = 'external_bot'
         FROM argus.actors a
-        WHERE a.id = n.author_id AND n.author_type = 'human' AND a.username !~ '{_HUMAN}'""")
+        WHERE a.id = n.author_id AND n.author_type = 'human' AND a.username ~* '{_TOKEN_BOT}'""")
     op.execute("""
         UPDATE argus.actors a SET is_bot = true
         WHERE EXISTS (SELECT 1 FROM argus.notes n WHERE n.author_id = a.id

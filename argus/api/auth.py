@@ -48,9 +48,12 @@ def resolve_principal(request: Request) -> Principal:
             return Principal(role="user", label="anonymous")
         raise HTTPException(status_code=401, detail="invalid or missing token")
 
-    if settings.admin_token and secrets.compare_digest(token, settings.admin_token):
+    token_b = token.encode("utf-8")
+    if settings.admin_token and secrets.compare_digest(
+            token_b, settings.admin_token.encode("utf-8")):
         return Principal(role="admin", label="admin-token")
-    if settings.api_token and secrets.compare_digest(token, settings.api_token):
+    if settings.api_token and secrets.compare_digest(
+            token_b, settings.api_token.encode("utf-8")):
         return Principal(role="user", label="user-token")
 
     # A token WAS presented and matched nothing configured -- always invalid,

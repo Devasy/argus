@@ -75,5 +75,5 @@ def build_chat_model(cfg: LLMConfig, callbacks: list | None = None) -> ChatLiteL
         model_kwargs["fallbacks"] = [cfg.fallback]
     if model_kwargs:
         kwargs["model_kwargs"] = model_kwargs
-    model_cls = _GroqChatLiteLLM if cfg.provider == "groq" else ChatLiteLLM
+    model_cls = _GroqChatLiteLLM if (cfg.provider == "groq" or (cfg.fallback and cfg.fallback.get("provider") == "groq")) else ChatLiteLLM
     return model_cls(**kwargs)

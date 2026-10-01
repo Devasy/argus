@@ -25,7 +25,12 @@ def _stale_or_never(now: datetime, reaudit_after_days: int):
 
 
 async def count_due(session: AsyncSession, repo_id, *, now: datetime,
-                    reaudit_after_days: int) -> int:
+                    reaudit_after_days: int, workspace: Path | None = None) -> int:
+    if workspace is not None:
+        due = await select_due_learnings(session, repo_id, workspace=workspace,
+                                         now=now, reaudit_after_days=reaudit_after_days,
+                                         limit=10000)
+        return len(due)
     return (await session.execute(select(func.count(Learning.id)).where(
         Learning.repo_id == repo_id, Learning.status == "active",
         _stale_or_never(now, reaudit_after_days)))).scalar_one()
@@ -47,7 +52,9 @@ async def select_due_learnings(session: AsyncSession, repo_id, *, workspace: Pat
             tier = 0
         else:
             if l.audited_at_sha and l.file_paths and l.audited_at_sha not in diffs:
-                diffs[l.audited_at_sha] = changed_paths_since(workspace, l.audited_at_sha)
+                import asyncio
+                diffs[l.audited_at_sha] = await asyncio.to_thread(
+                    changed_paths_since, workspace, l.audited_at_sha)
             changed = diffs.get(l.audited_at_sha) if l.audited_at_sha else None
             if changed and any(p in changed for p in (l.file_paths or [])):
                 tier = 1

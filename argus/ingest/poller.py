@@ -95,7 +95,10 @@ async def _pending_reconciliation_mr_iids(session: AsyncSession, repo_id,
               Note.kind == "inline",
               Note.disposition == "open",
               or_(last_commit_at.c.last_commit_at.is_(None),
-                  last_commit_at.c.last_commit_at >= cutoff))
+                  last_commit_at.c.last_commit_at >= cutoff,
+                  MergeRequest.updated_at >= cutoff,
+                  Note.note_created_at >= cutoff,
+                  Note.updated_at >= cutoff))
         .distinct()
     )).scalars().all()
     return list(rows)

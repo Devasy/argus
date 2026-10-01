@@ -1156,8 +1156,13 @@ async def run_review_pipeline(review_id, deps: PipelineDeps, checkpointer) -> Re
         if existing is None and thread_id != str(review_id):
             # Pre-sha checkpoints are keyed by the bare review_id: resume those once rather than restart a job straddling the deploy.
             legacy = {"configurable": {"thread_id": str(review_id)}}
-            if await checkpointer.aget_tuple(legacy) is not None:
-                config, existing = legacy, True
+            legacy_tuple = await checkpointer.aget_tuple(legacy)
+            if legacy_tuple is not None:
+                st = (legacy_tuple.checkpoint or {}).get("channel_values", {}).get("state")
+                st_sha = getattr(st, "head_sha", None) if st else None
+                head_sha = (deps.diff_refs or {}).get("head_sha") or ""
+                if not st_sha or st_sha == head_sha:
+                    config, existing = legacy, legacy_tuple
         if existing is not None:
             # A checkpoint already exists for this thread (a retried job for
             # the same review_id at the same head sha) — resume from it.

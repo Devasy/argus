@@ -355,13 +355,13 @@ async def apply_decisions(sf, settings, repo, mr, threads, decisions, staged,
         learning_ids: list[str] = []
         errored = False
         authors = {n.id: n.author_id for n in t.human_notes}
-        for sl in (s for s in staged if s.discussion_id == t.discussion_id) if d else ():
-            kind = resolve_kind(t, d.reply_verdict, sl.kind_hint)
-            target = sl.learning_id
-            async with sf() as s:
+        staged_for_thread = [s for s in staged if s.discussion_id == t.discussion_id] if d else []
+        async with sf() as s:
+            for sl in staged_for_thread:
+                kind = resolve_kind(t, d.reply_verdict, sl.kind_hint)
+                target = sl.learning_id
                 if target is not None:
                     existing = await s.get(Learning, target)
-                    # an update must not turn guidance into a suppression (or back); write a new learning
                     if existing is None or existing.kind != kind:
                         target = None
                 try:
@@ -374,33 +374,44 @@ async def apply_decisions(sf, settings, repo, mr, threads, decisions, staged,
                     counts["skipped_learnings"] += 1
                     continue
                 except Exception:
-                    # embedding or DB down: fail the thread so it retries within the attempt cap
                     logger.exception("writing a learning for thread %s failed", t.discussion_id)
                     counts["skipped_learnings"] += 1
                     errored = True
-                    continue
-                await s.commit()
-            learning_ids.append(str(row.id))
-            counts["updated" if target else "created"] += 1
-        async with sf() as s:
-            row = (await s.execute(select(DistillThread).where(
-                DistillThread.discussion_id == t.discussion_id))).scalar_one_or_none()
-            if row is None:
-                row = DistillThread(mr_id=mr.id, discussion_id=t.discussion_id,
-                                    thread_type=t.thread_type, content_hash=t.content_hash,
-                                    attempts=0)
-                s.add(row)
-            row.content_hash, row.thread_type = t.content_hash, t.thread_type
-            row.distillation_run_id, row.updated_at = distillation_run_id, now
-            row.attempts = (row.attempts or 0) + 1
+                    break
+                learning_ids.append(str(row.id))
+                counts["updated" if target else "created"] += 1
+
             if d is None or errored:
-                row.status = "failed"
-                counts["threads_failed"] += 1
+                await s.rollback()
+                async with sf() as s_fail:
+                    row = (await s_fail.execute(select(DistillThread).where(
+                        DistillThread.discussion_id == t.discussion_id))).scalar_one_or_none()
+                    if row is None:
+                        row = DistillThread(mr_id=mr.id, discussion_id=t.discussion_id,
+                                            thread_type=t.thread_type, content_hash=t.content_hash,
+                                            attempts=0)
+                        s_fail.add(row)
+                    row.content_hash, row.thread_type = t.content_hash, t.thread_type
+                    row.distillation_run_id, row.updated_at = distillation_run_id, now
+                    row.attempts = (row.attempts or 0) + 1
+                    row.status = "failed"
+                    counts["threads_failed"] += 1
+                    await s_fail.commit()
             else:
+                row = (await s.execute(select(DistillThread).where(
+                    DistillThread.discussion_id == t.discussion_id))).scalar_one_or_none()
+                if row is None:
+                    row = DistillThread(mr_id=mr.id, discussion_id=t.discussion_id,
+                                        thread_type=t.thread_type, content_hash=t.content_hash,
+                                        attempts=0)
+                    s.add(row)
+                row.content_hash, row.thread_type = t.content_hash, t.thread_type
+                row.distillation_run_id, row.updated_at = distillation_run_id, now
+                row.attempts = (row.attempts or 0) + 1
                 row.status, row.reply_verdict = "done", d.reply_verdict
                 row.verdict_reason, row.decision_reason = d.verdict_reason, d.reason
                 row.learning_ids = learning_ids
                 counts["threads_done"] += 1
                 await _apply_verdict_to_bot_notes(s, t, d.reply_verdict)
-            await s.commit()
+                await s.commit()
     return counts

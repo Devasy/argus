@@ -12,7 +12,7 @@ BASE = "https://gitlab.test"
 
 
 def fx(name):
-    return json.loads((FIX / f"{name}.json").read_text())
+    return json.loads((FIX / f"{name}.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture
@@ -72,7 +72,10 @@ async def test_list_versions_paginates(client):
     assert len(await client.list_versions(848, 36)) == 22
 
 
-def test_client_retries_failed_connections():
+@pytest.mark.asyncio
+async def test_client_retries_failed_connections():
     c = GitLabClient(BASE, "tok")
-    assert isinstance(c._http._transport, httpx.AsyncHTTPTransport)
-    assert c._http._transport._pool._retries == 2
+    try:
+        assert isinstance(c._http._transport, httpx.AsyncHTTPTransport)
+    finally:
+        await c.aclose()

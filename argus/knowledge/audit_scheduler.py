@@ -65,9 +65,12 @@ async def run_audit_forever(sf, settings, sleep_seconds: int = 3600) -> None:
                     select(Repository).where(Repository.enabled == True)  # noqa: E712
                 )).scalars().all())
                 now = datetime.now(timezone.utc)
+                ws_base = Path(settings.workspace_dir) if getattr(settings, "workspace_dir", None) else None
                 for repo in repos:
+                    ws_path = ws_base / repo.project_path if (ws_base and (ws_base / repo.project_path).exists()) else None
                     due = await count_due(s, repo.id, now=now,
-                                          reaudit_after_days=settings.audit_interval_days)
+                                          reaudit_after_days=settings.audit_interval_days,
+                                          workspace=ws_path)
                     if due:
                         await enqueue_audit(s, repo.id, trigger="scheduled")
                 await s.commit()
