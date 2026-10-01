@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
-import { api } from "./client";
+import { api, getToken } from "./client";
 import type {
   ProfileVersionIn,
   Repository,
