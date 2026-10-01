@@ -302,8 +302,15 @@ async def test_scheduler_fetches_current_code_for_recently_audited_learnings(eng
     from argus.domain.models import AuditRun
     from argus.knowledge.audit_scheduler import _schedule_repo
     from argus.review import workspace
+    from argus.gitlab.client import GitLabClient
     from tests.test_audit_pick import _git, _repo_with_two_commits
     source, first_sha = _repo_with_two_commits(tmp_path)
+    async def project(*args):
+        return {"default_branch": "main"}
+    async def branch(*args):
+        return {"commit": {"id": _git(source, "rev-parse", "HEAD")}}
+    monkeypatch.setattr(GitLabClient, "get_project", project)
+    monkeypatch.setattr(GitLabClient, "get_branch", branch)
     sf = session_factory(engine)
     now = datetime.now(timezone.utc)
     async with sf() as s:
@@ -326,6 +333,10 @@ async def test_scheduler_fetches_current_code_for_recently_audited_learnings(eng
             await _schedule_repo(s, cfg, repo.id, now)
             await s.commit()
             assert (await s.execute(select(AuditRun).where(AuditRun.repo_id == repo.id))).all() == []
+        async with sf() as s:
+            await _schedule_repo(s, cfg, repo.id, now)
+            await s.commit()
+        assert len(acquired) == 1, "an unchanged tip reuses the persisted negative check"
         (source / "b.py").write_text("y = 2\n", encoding="utf-8")
         _git(source, "commit", "-qam", "Relevant file changed")
         async with sf() as s:

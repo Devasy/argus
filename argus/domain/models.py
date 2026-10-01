@@ -46,6 +46,15 @@ class Repository(Base):
     created_at: Mapped[datetime] = _now()
 
 
+class RepositoryMaintenanceState(Base):
+    """Independent background cursors; ingestion must not overwrite these."""
+    __tablename__ = "repository_maintenance_state"
+    repo_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("repositories.id", ondelete="CASCADE"), primary_key=True)
+    audit_cursor: Mapped[dict | None] = mapped_column(JSONB)
+    thread_sweep_cursor: Mapped[dict | None] = mapped_column(JSONB)
+
+
 class Actor(Base):
     __tablename__ = "actors"
     __table_args__ = (UniqueConstraint("provider", "provider_user_id"),)
@@ -595,6 +604,8 @@ class Learning(Base):
     __tablename__ = "learnings"
     __table_args__ = (
         CheckConstraint("status IN ('active','archived')", name="learning_status_check"),
+        Index("ix_learnings_missing_embedding", "id",
+              postgresql_where=text("status = 'active' AND embedding IS NULL")),
     )
     id: Mapped[uuid.UUID] = _uuid_pk()
     repo_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("repositories.id"))
@@ -756,6 +767,8 @@ class Job(Base):
     __table_args__ = (
         CheckConstraint("status IN ('queued','running','done','failed')",
                         name="job_status_check"),
+        Index("ix_jobs_embedding_learning", text("(payload ->> 'learning_id')"), "created_at",
+              postgresql_where=text("kind = 'embed_learning'")),
     )
     id: Mapped[uuid.UUID] = _uuid_pk()
     kind: Mapped[str] = mapped_column(Text)

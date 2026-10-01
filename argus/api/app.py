@@ -311,6 +311,15 @@ def create_app(settings: Settings | None = None,
                 app.state.workers.append(asyncio.create_task(
                     run_worker_forever(sf, handlers, stop, worker_id=spec.id)))
             app.state.worker = app.state.workers[0]
+            # Vector repair must run even when custom chat lanes exclude it,
+            # and must not wait behind an hours-long review on the default lane.
+            from argus.knowledge.embedding_jobs import run_embedding_worker
+            embedding_worker_id = "embedding-maintenance"
+            while embedding_worker_id in {spec.id for spec in specs}:
+                embedding_worker_id += "-1"
+            app.state.embedding_worker = asyncio.create_task(run_embedding_worker(
+                sf, settings, stop, worker_id=embedding_worker_id))
+            app.state.workers.append(app.state.embedding_worker)
 
     @app.on_event("shutdown")
     async def _shutdown():
@@ -321,6 +330,10 @@ def create_app(settings: Settings | None = None,
         auditor_task = getattr(app.state, "auditor", None)
         if auditor_task is not None:
             auditor_task.cancel()
+        embedding_task = getattr(app.state, "embedding_worker", None)
+        if embedding_task is not None:
+            embedding_task.cancel()
+            await asyncio.gather(embedding_task, return_exceptions=True)
 
     @app.get("/health")
     async def health():

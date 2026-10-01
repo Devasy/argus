@@ -185,6 +185,10 @@ async def test_app_starts_one_loop_per_spec_and_each_claims_only_its_kinds(engin
 
     monkeypatch.setattr(app_module, "execute_review_job", fake_review)
     monkeypatch.setattr(app_module, "_run_distill_mr_job", fake_distill)
+    from argus.knowledge import embedding_jobs
+    async def fake_embedding(*args, **kwargs):
+        return [0.2] * 768
+    monkeypatch.setattr(embedding_jobs, "embed_text", fake_embedding)
     specs = ('[{"id": "rev", "kinds": ["review"], "endpoint": "pw-e2e-vm2"},'
              ' {"id": "dis", "kinds": ["distill_mr"]}]')
     app = app_module.create_app(
@@ -194,7 +198,8 @@ async def test_app_starts_one_loop_per_spec_and_each_claims_only_its_kinds(engin
 
     def _run():
         with TestClient(app):
-            assert len(app.state.workers) == 2
+            assert len(app.state.workers) == 3  # Two configured chat lanes plus vector maintenance.
+            assert app.state.embedding_worker in app.state.workers
             deadline = time.time() + 20
             while time.time() < deadline:
                 done = asyncio.run(_statuses())
