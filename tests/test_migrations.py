@@ -80,3 +80,62 @@ def test_alembic_upgrade_head_applies_cleanly(migration_db):
         else:
             os.environ["ARGUS_DATABASE_URL"] = old_env
         get_settings.cache_clear()
+
+
+def test_decision_history_upgrade_preserves_existing_ledger_decisions(migration_db):
+    from argus.db import session_factory
+    from argus.domain.models import DistillationRun, DistillThread
+    from tests.distill_helpers import _mr_disc
+
+    cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "migrations"))
+    old_env = os.environ.get("ARGUS_DATABASE_URL")
+    os.environ["ARGUS_DATABASE_URL"] = migration_db
+    get_settings.cache_clear()
+
+    async def seed():
+        engine = get_engine(migration_db)
+        try:
+            async with session_factory(engine)() as s:
+                _, mr, disc = await _mr_disc(s)
+                run = DistillationRun(mr_id=mr.id, note_ids=[], status="done")
+                s.add(run)
+                await s.flush()
+                s.add(DistillThread(mr_id=mr.id, discussion_id=disc.id,
+                    distillation_run_id=run.id, content_hash="original-content",
+                    thread_type="human_thread", status="done", reply_verdict="accepted",
+                    decision_reason="Original decision", learning_ids=[]))
+                await s.commit()
+                return str(run.id), str(disc.id)
+        finally:
+            await engine.dispose()
+
+    async def verify(run_id, discussion_id):
+        engine = get_engine(migration_db)
+        try:
+            async with engine.connect() as conn:
+                row = (await conn.execute(text("SELECT distillation_run_id, discussion_id, "
+                    "content_hash, decision FROM argus.distillation_decisions"))).one()
+                assert str(row.distillation_run_id) == run_id
+                assert str(row.discussion_id) == discussion_id
+                assert row.content_hash == "original-content"
+                assert row.decision["reply_verdict"] == "accepted"
+                assert row.decision["decision_reason"] == "Original decision"
+                assert "thread" not in row.decision, "migration must not invent historical replies"
+        finally:
+            await engine.dispose()
+
+    try:
+        command.upgrade(cfg, "b4f8d6f470df")
+        identifiers = asyncio.run(seed())
+        command.upgrade(cfg, "head")
+        asyncio.run(verify(*identifiers))
+        command.downgrade(cfg, "b4f8d6f470df")
+        command.upgrade(cfg, "head")
+        asyncio.run(verify(*identifiers))
+    finally:
+        if old_env is None:
+            os.environ.pop("ARGUS_DATABASE_URL", None)
+        else:
+            os.environ["ARGUS_DATABASE_URL"] = old_env
+        get_settings.cache_clear()

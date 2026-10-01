@@ -127,13 +127,17 @@ async def apply_verdict(session: AsyncSession, verdict: AuditVerdict, *,
         new_text = (verdict.suggested_hint_text or "").strip()
         if new_text and new_text != (learning.hint_text or "").strip():
             learning.hint_text = new_text
+            # A vector for the old wording must never rank the replacement.
+            # Hybrid retrieval can still use its lexical arm until re-embedding.
+            learning.embedding = None
             changed = True
     elif verdict.proposed_action == "merge" and verdict.related_learning_id:
         survivor = await session.get(Learning, verdict.related_learning_id)
         # merging into an archived row archives both; merging across repos cross-contaminates them
         if (survivor is not None and learning.id != survivor.id
                 and survivor.status == "active"
-                and survivor.repo_id == learning.repo_id):
+                and survivor.repo_id == learning.repo_id
+                and survivor.kind == learning.kind):
             # Fold evidence into the survivor so the merge does not throw away
             # the duplicate's accumulated verdicts.
             survivor.hit_count += learning.hit_count
@@ -144,8 +148,9 @@ async def apply_verdict(session: AsyncSession, verdict: AuditVerdict, *,
             # A merge may also sharpen the survivor's wording, since it now
             # has to cover what the duplicate said too.
             merged_text = (verdict.suggested_hint_text or "").strip()
-            if merged_text:
+            if merged_text and merged_text != (survivor.hint_text or "").strip():
                 survivor.hint_text = merged_text
+                survivor.embedding = None
             learning.status = "archived"
             changed = True
 

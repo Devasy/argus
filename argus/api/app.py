@@ -1126,7 +1126,10 @@ def create_app(settings: Settings | None = None,
             run = await session.get(DistillationRun, run_id)
             if run is None:
                 raise HTTPException(404)
-            from argus.domain.models import DistillThread
+            from argus.domain.models import DistillationDecision, DistillThread
+            saved = (await session.execute(select(DistillationDecision).where(
+                DistillationDecision.distillation_run_id == run_id)
+                .order_by(DistillationDecision.created_at, DistillationDecision.id))).scalars().all()
             rows = (await session.execute(select(DistillThread).where(
                 DistillThread.distillation_run_id == run_id)
                 .order_by(DistillThread.created_at))).scalars().all()
@@ -1148,6 +1151,8 @@ def create_app(settings: Settings | None = None,
                 learning_ids=r.learning_ids or [], decision_reason=r.decision_reason,
                 thread=thread_views.get(r.discussion_id))
                 for r in rows]
+            if saved:
+                threads = [DistillThreadOut.model_validate(r.decision) for r in saved]
             return DistillationRunOut(threads=threads,
                 id=run.id, mr_id=run.mr_id, status=run.status, trigger=run.trigger,
                 note_ids=run.note_ids, error=run.error,

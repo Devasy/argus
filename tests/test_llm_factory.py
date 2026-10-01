@@ -50,18 +50,13 @@ def test_build_chat_model_passes_num_retries_as_max_retries():
     assert model.max_retries == 5
 
 
-def test_build_chat_model_sends_fallback_via_model_kwargs():
-    """cfg.fallback is a litellm-shaped {model, api_base, api_key} dict for a
-    second endpoint. litellm.completion's own `fallbacks=` kwarg is read from
-    the top level of the request, and ChatLiteLLM.model_kwargs is spread
-    directly into that request -- so this needs no custom retry code, just
-    forwarding cfg.fallback into model_kwargs["fallbacks"]."""
+def test_build_chat_model_constructs_a_separate_fallback_endpoint():
     cfg = _cfg(fallback={"model": "openai/qwen3.8-27b",
                          "api_base": "http://llama:8080/v1", "api_key": None})
     model = build_chat_model(cfg)
-    assert model.model_kwargs["fallbacks"] == [
-        {"model": "openai/qwen3.8-27b", "api_base": "http://llama:8080/v1",
-         "api_key": None}]
+    assert "fallbacks" not in model.model_kwargs
+    assert model.fallback_model.model == "openai/qwen3.8-27b"
+    assert model.fallback_model.api_base == "http://llama:8080/v1"
 
 
 def test_build_chat_model_omits_fallback_when_unset():
@@ -77,8 +72,8 @@ def test_build_chat_model_combines_fallback_and_ollama_reasoning_budget():
                fallback={"model": "groq/x", "api_base": None, "api_key": "k"})
     model = build_chat_model(cfg)
     assert model.model_kwargs["reasoning_budget_tokens"] == 8192
-    assert model.model_kwargs["fallbacks"] == [
-        {"model": "groq/x", "api_base": None, "api_key": "k"}]
+    assert isinstance(model.fallback_model, _GroqChatLiteLLM)
+    assert model.fallback_model.model_kwargs == {}
 
 
 def test_build_chat_model_uses_groq_subclass_for_groq_provider():

@@ -641,6 +641,21 @@ class DistillationRun(Base):
     created_at: Mapped[datetime] = _now()
 
 
+class DistillationDecision(Base):
+    """Immutable decision and conversation captured for one distillation run."""
+
+    __tablename__ = "distillation_decisions"
+    __table_args__ = (UniqueConstraint("distillation_run_id", "discussion_id"),)
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    distillation_run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("distillation_runs.id", ondelete="CASCADE"), index=True)
+    discussion_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("discussions.id", ondelete="CASCADE"))
+    content_hash: Mapped[str] = mapped_column(Text)
+    decision: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = _now()
+
+
 class DistillThread(Base):
     """Distillation state of one MR discussion: which human notes it was last
     distilled at (content_hash) and what was decided.

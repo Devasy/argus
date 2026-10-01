@@ -121,6 +121,7 @@ def _merge_dicts(a: dict, b: dict) -> dict:
 
 
 class ReviewState(BaseModel):
+    head_sha: str = ""
     review_id: str
     plan: ReviewPlan | None = None
     findings: Annotated[list[CandidateFinding], operator.add] = []

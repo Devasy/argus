@@ -1931,10 +1931,9 @@ async def test_pipeline_with_no_reviewable_chunks_still_publishes(
     assert state.compiled and state.compiled.summary_markdown == "empty"
 
 
-async def test_pipeline_resumes_a_pre_deploy_bare_id_checkpoint(
+async def test_pipeline_restarts_a_legacy_checkpoint_with_unknown_head(
         db, engine, settings, tmp_path, fake_stage, monkeypatch, pg_checkpointer):
-    """Checkpoints written before thread ids carried the head sha are keyed by
-    the bare review_id; a job straddling the deploy must resume, not restart."""
+    """Unknown legacy heads cannot safely resume findings against a new commit."""
     from argus.db import session_factory
     from argus.review.pipeline import run_review_pipeline
     import argus.review.pipeline as pl
@@ -1954,7 +1953,7 @@ async def test_pipeline_resumes_a_pre_deploy_bare_id_checkpoint(
 
     deps.diff_refs = {"head_sha": "c" * 40}
     state = await run_review_pipeline(review_id, deps, checkpointer=pg_checkpointer)
-    assert len(fake_stage) == first
+    assert len(fake_stage) > first
     assert state.compiled and state.compiled.summary_markdown == "ok"
 
 

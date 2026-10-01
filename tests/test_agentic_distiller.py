@@ -403,7 +403,7 @@ async def test_an_update_that_would_change_the_kind_becomes_a_create(db, engine,
     sf, repo, mr, t = await _thread(engine)
     async with sf() as s:
         existing = Learning(repo_id=repo.id, topic="resources", hint_text="prefer with-blocks",
-                            kind="guidance")
+                            kind="guidance", embedding=[0.3] * 768)
         s.add(existing)
         await s.commit()
     staged = [StagedLearning(t.discussion_id, "update", existing.id, None, "resources",

@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, select
+from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -298,22 +299,47 @@ async def sweep_pending_threads(session: AsyncSession, repo, now: datetime, *,
 
     from argus.domain.models import MergeRequest
     lt = DistillThread
-    mr_ids = (await session.execute(
-        select(MergeRequest.id).join(Note, Note.mr_id == MergeRequest.id)
-        .outerjoin(lt, lt.discussion_id == Note.discussion_id)
-        .where(MergeRequest.repo_id == repo.id, Note.author_type == "human",
-               Note.kind.in_(_HUMAN_KINDS), Note.discussion_id.isnot(None),
+    humans = (select(Note.discussion_id,
+                     func.min(Note.note_created_at).label("oldest"),
+                     func.md5(func.string_agg(cast(Note.id, String),
+                         aggregate_order_by(",", cast(Note.id, String)))).label("content_hash"))
+              .where(Note.author_type == "human", Note.kind.in_(_HUMAN_KINDS),
+                     Note.discussion_id.isnot(None))
+              .group_by(Note.discussion_id).subquery())
+    oldest = func.coalesce(func.min(humans.c.oldest), now)
+    candidates = (
+        select(MergeRequest.id.label("mr_id"), oldest.label("oldest"))
+        .join(Discussion, Discussion.mr_id == MergeRequest.id)
+        .join(humans, humans.c.discussion_id == Discussion.id)
+        .outerjoin(lt, lt.discussion_id == Discussion.id)
+        .where(MergeRequest.repo_id == repo.id,
                or_(lt.id.is_(None),
+                   lt.content_hash != humans.c.content_hash,
                    and_(lt.status == "failed", lt.attempts < MAX_THREAD_ATTEMPTS),
                    and_(lt.status == "queued",
                         lt.updated_at < now - timedelta(hours=STALE_QUEUED_HOURS),
-                        lt.attempts < MAX_THREAD_ATTEMPTS),
-                   Note.note_created_at > lt.updated_at))
+                        lt.attempts < MAX_THREAD_ATTEMPTS)))
         .group_by(MergeRequest.id)
-        .order_by(func.min(Note.note_created_at))
-        .limit(SWEEP_MR_LIMIT))).scalars().all()
-    jobs = 0
-    for mr_id in mr_ids:
-        mr = await session.get(MergeRequest, mr_id)
-        jobs += len(await enqueue_ready_threads(session, mr, now, quiet_hours=quiet_hours))
+        .subquery())
+    jobs = eligible_mrs = 0
+    cursor = None
+    # Apply the cap to MRs that actually enqueue work. Quiet-time and external
+    # bot exclusions must not let older ineligible MRs starve ready threads.
+    while eligible_mrs < SWEEP_MR_LIMIT:
+        q = select(candidates).order_by(candidates.c.oldest, candidates.c.mr_id)
+        if cursor is not None:
+            at, mr_id = cursor
+            q = q.where(or_(candidates.c.oldest > at,
+                           and_(candidates.c.oldest == at, candidates.c.mr_id > mr_id)))
+        batch = (await session.execute(q.limit(SWEEP_MR_LIMIT))).all()
+        if not batch:
+            break
+        for mr_id, at in batch:
+            cursor = (at, mr_id)
+            mr = await session.get(MergeRequest, mr_id)
+            enqueued = await enqueue_ready_threads(session, mr, now, quiet_hours=quiet_hours)
+            jobs += len(enqueued)
+            eligible_mrs += bool(enqueued)
+            if eligible_mrs >= SWEEP_MR_LIMIT:
+                break
     return jobs

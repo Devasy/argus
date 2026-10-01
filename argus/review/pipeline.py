@@ -1148,7 +1148,8 @@ async def run_review_pipeline(review_id, deps: PipelineDeps, checkpointer) -> Re
     graph = build_graph(deps, checkpointer)
     thread_id = checkpoint_thread_id(review_id, (deps.diff_refs or {}).get("head_sha") or "")
     config = {"configurable": {"thread_id": thread_id}}
-    fresh = ReviewState(review_id=str(review_id))
+    head_sha = (deps.diff_refs or {}).get("head_sha") or ""
+    fresh = ReviewState(review_id=str(review_id), head_sha=head_sha)
 
     input_state = fresh
     if checkpointer is not None:
@@ -1158,10 +1159,13 @@ async def run_review_pipeline(review_id, deps: PipelineDeps, checkpointer) -> Re
             legacy = {"configurable": {"thread_id": str(review_id)}}
             legacy_tuple = await checkpointer.aget_tuple(legacy)
             if legacy_tuple is not None:
-                st = (legacy_tuple.checkpoint or {}).get("channel_values", {}).get("state")
-                st_sha = getattr(st, "head_sha", None) if st else None
-                head_sha = (deps.diff_refs or {}).get("head_sha") or ""
-                if not st_sha or st_sha == head_sha:
+                channels = (legacy_tuple.checkpoint or {}).get("channel_values", {})
+                st = channels.get("state")
+                st_sha = channels.get("head_sha") or (
+                    st.get("head_sha") if isinstance(st, dict) else getattr(st, "head_sha", None))
+                # Unknown legacy heads cannot prove that their findings belong
+                # to this commit. LangGraph stores Pydantic fields as channels.
+                if st_sha == head_sha:
                     config, existing = legacy, legacy_tuple
         if existing is not None:
             # A checkpoint already exists for this thread (a retried job for

@@ -30,22 +30,19 @@ def test_malformed_specs_fall_back_instead_of_breaking_startup(caplog):
             assert parse_worker_specs(raw, KINDS) == [WorkerSpec(id="w1", kinds=tuple(KINDS))], raw
 
 
-def test_a_kind_no_worker_claims_is_warned_about(caplog):
+def test_a_kind_no_worker_claims_is_warned_about(caplog, monkeypatch):
+    monkeypatch.setattr(logging.getLogger("argus"), "propagate", True)
     with caplog.at_level(logging.WARNING, logger="argus.jobs"):
         specs = parse_worker_specs('[{"id": "rev", "kinds": ["review"]}]', KINDS)
     assert specs == [WorkerSpec(id="rev", kinds=("review",))]
     assert "distill_mr" in caplog.text
 
 
-def test_audit_repo_is_never_assigned_to_the_default_fallback_worker(caplog):
-    """audit_repo is GPU-2-only and explicit-lane-only by design: an unset or
-    malformed ARGUS_WORKER_SPECS must leave it queued safely, never silently
-    sharing the review/distill fallback worker (and its default LLM
-    endpoint) the way every other kind does."""
+def test_audit_repo_is_assigned_to_the_default_fallback_worker(caplog):
+    """An OSS install with one worker can run audits without a GPU-specific lane."""
     with caplog.at_level(logging.WARNING, logger="argus.jobs"):
         specs = parse_worker_specs("", KINDS + ["audit_repo"])
-    assert specs == [WorkerSpec(id="w1", kinds=("review", "distill_mr"))]
-    assert "audit_repo" in caplog.text
+    assert specs == [WorkerSpec(id="w1", kinds=("review", "distill_mr", "audit_repo"))]
 
 
 async def _review_row(sf, llm_config: dict, tag: str):

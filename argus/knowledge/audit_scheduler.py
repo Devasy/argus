@@ -9,6 +9,7 @@ when a REPO gets audited.
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 logger = logging.getLogger("argus.audit_scheduler")
 
@@ -48,12 +49,9 @@ async def run_audit_forever(sf, settings, sleep_seconds: int = 3600) -> None:
     """Background loop. No-op unless settings.audit_enabled is on.
 
     Enqueues, never runs: an audit_repo job (Task 9's audit_job.py) does the
-    actual work on its own worker lane, pinned to GPU 2."""
+    actual work on a configured worker lane."""
     from sqlalchemy import select
-
     from argus.domain.models import Repository
-    from argus.knowledge.audit_job import enqueue_audit
-    from argus.knowledge.audit_pick import count_due
 
     while True:
         try:
@@ -61,19 +59,51 @@ async def run_audit_forever(sf, settings, sleep_seconds: int = 3600) -> None:
                 await asyncio.sleep(sleep_seconds)
                 continue
             async with sf() as s:
-                repos = list((await s.execute(
-                    select(Repository).where(Repository.enabled == True)  # noqa: E712
+                repo_ids = list((await s.execute(
+                    select(Repository.id).where(Repository.enabled == True)  # noqa: E712
                 )).scalars().all())
-                now = datetime.now(timezone.utc)
-                ws_base = Path(settings.workspace_dir) if getattr(settings, "workspace_dir", None) else None
-                for repo in repos:
-                    ws_path = ws_base / repo.project_path if (ws_base and (ws_base / repo.project_path).exists()) else None
-                    due = await count_due(s, repo.id, now=now,
-                                          reaudit_after_days=settings.audit_interval_days,
-                                          workspace=ws_path)
-                    if due:
-                        await enqueue_audit(s, repo.id, trigger="scheduled")
-                await s.commit()
+            now = datetime.now(timezone.utc)
+            for repo_id in repo_ids:
+                try:
+                    async with sf() as s:
+                        await _schedule_repo(s, settings, repo_id, now)
+                        await s.commit()
+                except Exception:
+                    logger.exception("audit scheduling failed for repo %s", repo_id)
         except Exception:
             logger.exception("audit scheduler iteration failed")
         await asyncio.sleep(sleep_seconds)
+
+
+async def _schedule_repo(s, settings, repo_id, now):
+    from sqlalchemy import select
+    from argus.domain.models import Learning, Repository
+    from argus.knowledge.audit_job import enqueue_audit
+    from argus.knowledge.audit_pick import count_due
+    from argus.knowledge.auditor import resolve_audit_ref
+    from argus.review.workspace import WorkspaceManager
+
+    repo = await s.get(Repository, repo_id)
+    if repo is None or not repo.enabled:
+        return
+    due = await count_due(s, repo.id, now=now,
+                          reaudit_after_days=settings.audit_interval_days)
+    if not due:
+        tracked = (await s.execute(select(Learning.id).where(
+            Learning.repo_id == repo.id, Learning.status == "active",
+            Learning.audited_at_sha.isnot(None), Learning.file_paths.isnot(None))
+            .limit(1))).first()
+        if tracked:
+            ref = await resolve_audit_ref(s, repo)
+            wm = WorkspaceManager(
+                Path(settings.workspace_root).expanduser() / str(repo.id),
+                f"{settings.gitlab_url.replace('://', f'://oauth2:{settings.gitlab_token}@')}"
+                f"/{repo.project_path}.git")
+            try:
+                workspace = await wm.acquire(ref)
+                due = await count_due(s, repo.id, now=now,
+                    reaudit_after_days=settings.audit_interval_days, workspace=workspace)
+            finally:
+                await wm.release(ref)
+    if due:
+        await enqueue_audit(s, repo.id, trigger="scheduled")
