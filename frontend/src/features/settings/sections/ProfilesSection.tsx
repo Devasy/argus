@@ -135,7 +135,7 @@ export default function ProfilesSection() {
       {profiles.isPending && <div className="spinner">Loading profiles…</div>}
       {profiles.data && (
         <div className="table-wrap">
-          <table className="ui-table">
+          <table className="nw-table">
             <thead>
               <tr>
                 <th>Name</th>

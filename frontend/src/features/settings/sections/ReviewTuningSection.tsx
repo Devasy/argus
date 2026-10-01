@@ -23,6 +23,11 @@ const FIELDS = [
     help: "learning distillation from human review comments — it searches existing learnings and reads code per point, so it needs a budget like scout's",
   },
   {
+    key: "distill_quiet_hours",
+    label: "Distill settle time (hours)",
+    help: "an open, unresolved review thread is distilled only after this long with no new human reply; resolved threads and merged/closed MRs are distilled right away. 0 = immediately",
+  },
+  {
     key: "reasoning_budget_tokens",
     label: "Reasoning budget (tokens)",
     help: "self-hosted (ollama) reasoning models only — forces the model to stop thinking and answer within this many tokens",
@@ -53,6 +58,24 @@ const FIELDS = [
     label: "Output margin (tokens)",
     help: "safety buffer reserved below the context window on top of the estimated input size",
   },
+  {
+    key: "chunk_token_budget",
+    label: "Chunk token budget (tokens)",
+    help: "diff size per analysis chunk before it's split; 0 = auto (a fifth of the model context window)",
+  },
+] as const;
+
+const SELECT_FIELDS = [
+  {
+    key: "followup_mode",
+    label: "Follow-up on prior comments",
+    help: "reply on silent or claimed-fix threads from earlier reviews",
+    options: [
+      { value: "off", label: "Off" },
+      { value: "reply_only", label: "Reply only (no auto-resolve)" },
+      { value: "resolve", label: "Reply and resolve verified fixes" },
+    ],
+  },
 ] as const;
 
 export default function ReviewTuningSection() {
@@ -61,8 +84,9 @@ export default function ReviewTuningSection() {
   const form = useDirtyForm({});
   useEffect(() => {
     if (data) {
-      const slice: Record<string, number> = {};
+      const slice: Record<string, number | string> = {};
       for (const f of FIELDS) slice[f.key] = data.values[f.key] as number;
+      for (const f of SELECT_FIELDS) slice[f.key] = data.values[f.key] as string;
       form.rebase(slice);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -72,20 +96,21 @@ export default function ReviewTuningSection() {
   if (error) return <ErrorBox message={error.message} onRetry={refetch} />;
 
   const onSave = () => {
-    const changed: Record<string, number> = {};
-    for (const k of form.dirtyKeys) changed[k] = form.draft[k] as number;
+    const changed: Record<string, number | string> = {};
+    for (const k of form.dirtyKeys) changed[k] = form.draft[k] as number | string;
     // useInvalidating-based mutations take their args as a tuple
     save.mutate([changed], {
       onSuccess: (view) => {
-        const slice: Record<string, number> = {};
+        const slice: Record<string, number | string> = {};
         for (const f of FIELDS) slice[f.key] = view.values[f.key] as number;
+        for (const f of SELECT_FIELDS) slice[f.key] = view.values[f.key] as string;
         form.rebase(slice);
       },
     });
   };
 
   return (
-    <div className="ui-card set-card">
+    <div className="nw-card set-card">
       <h3>Review tuning</h3>
       <p className="muted">
         Bounds every review run. Changes apply to the next run — running reviews keep the values
@@ -102,6 +127,24 @@ export default function ReviewTuningSection() {
             value={String(form.draft[f.key] ?? "")}
             onChange={(e) => form.set(f.key, Number(e.target.value))}
           />
+        </div>
+      ))}
+      {SELECT_FIELDS.map((f) => (
+        <div className="f-row" key={f.key}>
+          <div className="fl">
+            <b>{f.label}</b>
+            <span>{f.help}</span>
+          </div>
+          <select
+            value={String(form.draft[f.key] ?? "")}
+            onChange={(e) => form.set(f.key, e.target.value)}
+          >
+            {f.options.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
         </div>
       ))}
       {save.error ? <ErrorBox message={save.error.message} /> : null}

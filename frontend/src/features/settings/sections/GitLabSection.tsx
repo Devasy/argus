@@ -37,7 +37,7 @@ export default function GitLabSection() {
   };
 
   return (
-    <div className="ui-card set-card">
+    <div className="nw-card set-card">
       <h3>GitLab connection</h3>
       <p className="muted">Connection details for the GitLab instance being polled and reviewed.</p>
       <div className="f-row">

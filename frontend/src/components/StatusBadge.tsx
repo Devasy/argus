@@ -62,6 +62,12 @@ const CONFIG: Record<string, Config> = {
     icon: Circle,
   },
   closed: { bg: "var(--bg-raised)", color: "var(--text-tertiary)", label: "Closed", icon: XCircle },
+  stale: {
+    bg: "var(--state-warning-bg)",
+    color: "var(--state-warning)",
+    label: "Stale",
+    icon: Clock,
+  },
 };
 
 const FALLBACK: Config = {
@@ -76,7 +82,7 @@ export default function StatusBadge({ status, label }: { status: string; label?:
   const Icon = cfg.icon;
   return (
     <span className="badge" style={{ background: cfg.bg, color: cfg.color }}>
-      <Icon size={12} className={cfg.spin ? "ui-spin" : undefined} />
+      <Icon size={12} className={cfg.spin ? "nw-spin" : undefined} />
       <span>{label ?? cfg.label}</span>
     </span>
   );

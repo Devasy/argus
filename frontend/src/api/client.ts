@@ -14,6 +14,7 @@ import type {
   AvailableTool,
   ReviewerAgentVersionHistory,
   Learning,
+  LearningsQueryParams,
   FileKnowledgeEntry,
   Paginated,
   DistillationRun,
@@ -22,15 +23,28 @@ import type {
   NoteVerdictIn,
   AuditVerdict,
   AuditRun,
+  AuditRunDetail,
   ReviewListItem,
   ReviewQueueSummary,
   PaginatedComplaints,
   RepoAgentSetting,
+  RepoSisterLink,
+  RepoSisterLinkIn,
+  TATStats,
+  UserStatsList,
+  ReviewerGraph,
+  CommentSourceStats,
+  Me,
 } from "./types";
 
 const BASE = "/api";
 const TOKEN_KEY = "argus_token";
 
+// One token per session now, not two. The backend resolves it to a role
+// (api/auth.py's require_role) -- pasting the admin token here also unlocks
+// every regular route, since admin outranks user. Which pages/nav items are
+// visible is driven by GET /me's role, not by which token key is present in
+// localStorage (see App.tsx's usePrincipal).
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -92,6 +106,7 @@ export async function checkHealth(): Promise<boolean> {
 }
 
 export const api = {
+  me: () => http<Me>("/me"),
   repositories: (params: { page?: number; per_page?: number } = {}) => {
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) if (v !== undefined) qs.set(k, String(v));
@@ -114,7 +129,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   reconcileAndDistill: (mrId: string) =>
-    http<{ queued_run: boolean; note_count: number }>(
+    http<{ queued_runs: number; changed_dispositions: number }>(
       `/merge-requests/${mrId}/reconcile-and-distill`, {
       method: "POST",
       body: JSON.stringify({}),
@@ -155,7 +170,15 @@ export const api = {
   updateRepository: (
     id: string,
     patch: Partial<
-      Pick<Repository, "enabled" | "poll_interval_s" | "default_profile_id" | "auto_review_enabled">
+      Pick<
+        Repository,
+        | "enabled"
+        | "poll_interval_s"
+        | "stale_mr_after_days"
+        | "learnings_cooldown_hours"
+        | "default_profile_id"
+        | "auto_review_enabled"
+      >
     >,
   ) => http<Repository>(`/repositories/${id}`, { method: "PUT", body: JSON.stringify(patch) }),
   settings: () => http<SettingsView>("/settings"),
@@ -205,6 +228,13 @@ export const api = {
     for (const [k, v] of Object.entries(params)) if (v !== undefined) qs.set(k, String(v));
     return http<PaginatedComplaints>(`/complaints?${qs}`);
   },
+  repoSisters: (repoId: string) =>
+    http<RepoSisterLink[]>(`/repositories/${repoId}/sisters`),
+  setRepoSisters: (repoId: string, links: RepoSisterLinkIn[]) =>
+    http<RepoSisterLink[]>(`/repositories/${repoId}/sisters`, {
+      method: "PUT",
+      body: JSON.stringify(links),
+    }),
   repoAgents: (repoId: string) =>
     http<RepoAgentSetting[]>(`/repositories/${repoId}/agents`),
   setRepoAgent: (repoId: string, agentId: string, enabled: boolean) =>
@@ -212,20 +242,14 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
-  learnings: (params: {
-    repo_id?: string;
-    kind?: string;
-    status?: string;
-    page?: number;
-    per_page?: number;
-  }) => {
+  learnings: (params: LearningsQueryParams & { page?: number; per_page?: number }) => {
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) if (v !== undefined) qs.set(k, String(v));
     return http<Paginated<Learning>>(`/learnings?${qs}`);
   },
   searchLearnings: (
     q: string,
-    params: { repo_id?: string; page?: number; per_page?: number } = {},
+    params: LearningsQueryParams & { page?: number; per_page?: number } = {},
   ) => {
     const qs = new URLSearchParams({ q });
     for (const [k, v] of Object.entries(params)) if (v !== undefined) qs.set(k, String(v));
@@ -265,13 +289,13 @@ export const api = {
     for (const [k, v] of Object.entries(params)) if (v !== undefined) qs.set(k, String(v));
     return http<Paginated<AuditRun>>(`/audit-runs?${qs}`);
   },
+  auditRun: (runId: string) => http<AuditRunDetail>(`/audit-runs/${runId}`),
   auditRunTrace: (runId: string) => http<Trace>(`/audit-runs/${runId}/trace`),
-  triggerAudit: (repoId: string, maxClusters?: number) => {
-    const qs = new URLSearchParams();
-    if (maxClusters !== undefined) qs.set("max_clusters", String(maxClusters));
-    return http<{ status: string; clusters?: number; verdicts?: number }>(
-      `/repositories/${repoId}/audit?${qs}`,
-      { method: "POST" },
-    );
-  },
+  triggerAudit: (repoId: string) =>
+    http<{ audit_run_id: string }>(`/repositories/${repoId}/audit`, { method: "POST" }),
+  tatStats: () => http<TATStats>("/stats/tat"),
+  userStats: (days: number) => http<UserStatsList>(`/stats/users?days=${days}`),
+  reviewerGraph: () => http<ReviewerGraph>("/stats/reviewer-graph"),
+  commentSourceStats: (days: number) =>
+    http<CommentSourceStats>(`/stats/comment-sources?days=${days}`),
 };

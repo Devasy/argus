@@ -48,7 +48,7 @@ export default function VersionHistory({ agentId }: { agentId: string }) {
   };
 
   return (
-    <div className="ui-card" style={{ padding: "18px 20px", marginTop: 14 }}>
+    <div className="nw-card" style={{ padding: "18px 20px", marginTop: 14 }}>
       <div className="muted" style={{ fontSize: 11, marginBottom: 10 }}>
         VERSION HISTORY
       </div>

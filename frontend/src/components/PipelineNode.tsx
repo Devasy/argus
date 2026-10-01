@@ -3,10 +3,18 @@ import { fmtDuration, fmtTokens, type GraphNodeSpec } from "../lib/pipelineGraph
 
 const KIND_META: Record<GraphNodeSpec["kind"], { icon: string; tag: string }> = {
   scout: { icon: "⌖", tag: "context" },
+  retrieval: { icon: "⌕", tag: "learnings" },
   chunk: { icon: "▤", tag: "analysis" },
   agent: { icon: "✦", tag: "reviewer agent" },
   verify: { icon: "✓", tag: "gate" },
+  "verify-branch": { icon: "✓", tag: "verify chunk" },
+  "verify-delegate": { icon: "✦", tag: "verify sub-agent" },
   publish: { icon: "↗", tag: "output" },
+  pick: { icon: "☰", tag: "due learnings" },
+  ground: { icon: "▤", tag: "ground" },
+  investigate: { icon: "✦", tag: "investigate sub-agent" },
+  relate: { icon: "⇄", tag: "relate" },
+  apply: { icon: "↗", tag: "apply" },
 };
 
 export default function PipelineNode({
@@ -25,7 +33,7 @@ export default function PipelineNode({
         : `${spec.allowed}/${spec.produced} kept`;
   return (
     <div
-      className={`pl-node pl-${spec.status}${selected ? " sel" : ""}${spec.status === "running" ? " ui-pulse" : ""}`}
+      className={`pl-node pl-${spec.status}${selected ? " sel" : ""}${spec.status === "running" ? " nw-pulse" : ""}`}
     >
       <Handle type="target" position={Position.Left} className="pl-handle" />
       <div className="pl-head">

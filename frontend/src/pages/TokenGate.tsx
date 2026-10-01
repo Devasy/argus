@@ -22,7 +22,7 @@ export default function TokenGate() {
 
   return (
     <div className="gate">
-      <div className="ui-card form-grid">
+      <div className="nw-card form-grid">
         <div className="row">
           <KeyRound size={18} />
           <h2>argus API token</h2>

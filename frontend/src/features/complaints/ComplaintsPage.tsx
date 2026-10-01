@@ -3,7 +3,10 @@ import { AlertTriangle } from "lucide-react";
 import { useComplaints } from "../../api/queries";
 import type { AgentComplaint } from "../../api/types";
 import ErrorBox from "../../components/ErrorBox";
+import FilterBuilder from "../../components/FilterBuilder";
 import PaginationBar from "../../components/PaginationBar";
+import { buildQueryParams, type Condition } from "../../components/filterConditions";
+import { complaintsFilterFields } from "./complaintsFilterFields";
 
 /** Problems agents reported about OUR tools, prompts and context.
  *
@@ -22,9 +25,6 @@ const CATEGORIES = [
   "instructions_conflict",
   "task_impossible",
 ] as const;
-
-type CategoryFilter = "all" | (typeof CATEGORIES)[number];
-type BlockedFilter = "all" | "blocked" | "worked-around";
 
 const CATEGORY_LABEL: Record<string, string> = {
   tool_broken: "Tool broken",
@@ -49,11 +49,14 @@ function fmtWhen(iso: string): string {
 }
 
 export default function ComplaintsPage() {
-  const [category, setCategory] = useState<CategoryFilter>("all");
-  const [blocked, setBlocked] = useState<BlockedFilter>("all");
+  const [draftConditions, setDraftConditions] = useState<Condition[]>([]);
+  const [conditions, setConditions] = useState<Condition[]>([]);
   const [target, setTarget] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(50);
+
+  const fields = useMemo(() => complaintsFilterFields(CATEGORIES), []);
+  const conditionParams = useMemo(() => buildQueryParams(fields, conditions), [fields, conditions]);
 
   const filters = useMemo(() => {
     const f: {
@@ -62,12 +65,10 @@ export default function ComplaintsPage() {
       target?: string;
       page?: number;
       per_page?: number;
-    } = { page, per_page: perPage };
-    if (category !== "all") f.category = category;
-    if (blocked !== "all") f.blocked = blocked === "blocked";
+    } = { ...conditionParams, page, per_page: perPage };
     if (target !== null) f.target = target;
     return f;
-  }, [category, blocked, target, page, perPage]);
+  }, [conditionParams, target, page, perPage]);
 
   const result = useComplaints(filters);
   const items: AgentComplaint[] = result.data?.items ?? [];
@@ -78,6 +79,8 @@ export default function ComplaintsPage() {
     fn();
     setPage(1);
   };
+
+  const applyFilters = () => reset(() => setConditions(draftConditions));
 
   return (
     <div>
@@ -137,45 +140,31 @@ export default function ComplaintsPage() {
         </div>
       )}
 
-      <div className="row" style={{ gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
-        <button
-          className={`chip${category === "all" ? " on" : ""}`}
-          onClick={() => reset(() => setCategory("all"))}
-        >
-          All categories
-        </button>
-        {CATEGORIES.map((c) => (
-          <button
-            key={c}
-            className={`chip${category === c ? " on" : ""}`}
-            onClick={() => reset(() => setCategory(c))}
-          >
-            {CATEGORY_LABEL[c]}
+      <form
+        className="nw-card"
+        style={{ marginBottom: 14 }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          applyFilters();
+        }}
+      >
+        <FilterBuilder fields={fields} conditions={draftConditions} onChange={setDraftConditions} />
+        <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
+          <button type="submit" className="btn-p">
+            Apply filters
           </button>
-        ))}
-        <span className="chip-divider" />
-        {(["all", "blocked", "worked-around"] as const).map((b) => (
-          <button
-            key={b}
-            className={`chip${blocked === b ? " on" : ""}`}
-            onClick={() => reset(() => setBlocked(b))}
-          >
-            {b === "all"
-              ? "Any impact"
-              : b === "blocked"
-                ? "Blocked the work"
-                : "Worked around"}
-          </button>
-        ))}
+        </div>
         {target !== null && (
-          <>
-            <span className="chip-divider" />
-            <button className="chip on" onClick={() => reset(() => setTarget(null))}>
-              target: {target} ✕
-            </button>
-          </>
+          <div className="row muted" style={{ fontSize: 12.5, gap: 8, marginTop: 10 }}>
+            <span>
+              Drilled into target: <code>{target}</code>
+            </span>
+            <a href="#" onClick={(e) => { e.preventDefault(); reset(() => setTarget(null)); }}>
+              Clear
+            </a>
+          </div>
         )}
-      </div>
+      </form>
 
       {!result.isLoading && items.length === 0 && (
         <div className="card muted">

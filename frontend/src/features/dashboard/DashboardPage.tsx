@@ -2,13 +2,16 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Activity,
+  AlertOctagon,
   Brain,
+  Gauge,
   GitPullRequestArrow,
+  ListTodo,
   MessagesSquare,
   ThumbsUp,
 } from "lucide-react";
 import { useDashboardStats } from "../../api/queries";
-import type { DashboardActivity, DashboardAgent } from "../../api/types";
+import type { DashboardActivity, DashboardAgent, OpsStats } from "../../api/types";
 import ErrorBox from "../../components/ErrorBox";
 import {
   barHeights,
@@ -34,7 +37,7 @@ function StatTile({
   detail: string;
 }) {
   return (
-    <div className="ui-card dash-stat">
+    <div className="nw-card dash-stat">
       <div className="dash-stat-head">
         <span className="dash-stat-icon">
           <Icon size={15} />
@@ -159,13 +162,66 @@ function ReviewsPerDayChart({ days, window: windowDays }: { days: { date: string
   );
 }
 
+function OpsSection({ ops }: { ops: OpsStats }) {
+  const queued = ops.reviews_queued + ops.distillation_queued;
+  const running = ops.reviews_running + ops.distillation_running + ops.audits_running;
+  const failed = ops.reviews_failed + ops.distillation_failed + ops.audits_failed;
+  return (
+    <>
+      <h3 className="section dash-subhead">Ops</h3>
+      <div className="dash-stat-grid">
+        <StatTile
+          icon={ListTodo}
+          label="Queued"
+          value={fmtCompact(queued)}
+          detail={`${ops.reviews_queued} reviews · ${ops.distillation_queued} distillation`}
+        />
+        <StatTile
+          icon={Gauge}
+          label="Running"
+          value={fmtCompact(running)}
+          detail={`${ops.reviews_running} reviews · ${ops.distillation_running} distillation · ${ops.audits_running} audits`}
+        />
+        <StatTile
+          icon={AlertOctagon}
+          label="Failed"
+          value={fmtCompact(failed)}
+          detail="in this window"
+        />
+      </div>
+      {ops.jobs_by_kind.length > 0 && (
+        <div className="table-wrap">
+          <table className="nw-table">
+            <thead>
+              <tr>
+                <th>Job kind</th>
+                <th>Queued</th>
+                <th>Running</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ops.jobs_by_kind.map((j) => (
+                <tr key={j.kind}>
+                  <td className="mono">{j.kind}</td>
+                  <td>{j.queued}</td>
+                  <td>{j.running}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function DashboardPage() {
   const [days, setDays] = useState<number>(14);
   const stats = useDashboardStats(days);
   const t = stats.data?.tiles;
 
   return (
-    <div className="ui-fade">
+    <div className="nw-fade">
       <div className="page-head">
         <div>
           <h1>Dashboard</h1>
@@ -208,7 +264,8 @@ export default function DashboardPage() {
               icon={ThumbsUp}
               label="Acceptance rate"
               value={fmtPct(t.acceptance_rate)}
-              detail={`${t.accepted} accepted · ${t.rejected} rejected`}
+              detail={`${t.accepted} accepted · ${t.rejected} rejected${
+                t.accepted_by_followup ? ` · ${t.accepted_by_followup} verified by follow-up` : ""}`}
             />
             <StatTile
               icon={Brain}
@@ -225,14 +282,14 @@ export default function DashboardPage() {
           </div>
 
           <div className="dash-cols">
-            <div className="ui-card section">
+            <div className="nw-card section">
               <div className="flex-between">
                 <strong>Reviews per day</strong>
                 <span className="muted">{days} days</span>
               </div>
               <ReviewsPerDayChart days={stats.data.reviews_per_day} window={days} />
             </div>
-            <div className="ui-card section dash-activity">
+            <div className="nw-card section dash-activity">
               <strong>Recent activity</strong>
               <div className="dash-feed">
                 {stats.data.activity.length === 0 && (
@@ -253,7 +310,7 @@ export default function DashboardPage() {
             <div className="muted">No reviewer agents configured yet.</div>
           ) : (
             <div className="table-wrap">
-              <table className="ui-table">
+              <table className="nw-table">
                 <thead>
                   <tr>
                     <th>Agent</th>
@@ -273,6 +330,8 @@ export default function DashboardPage() {
               </table>
             </div>
           )}
+
+          <OpsSection ops={stats.data.ops} />
         </>
       )}
     </div>

@@ -57,7 +57,7 @@ export default function ModelsSection() {
   };
 
   return (
-    <div className="ui-card set-card">
+    <div className="nw-card set-card">
       <h3>Models &amp; embeddings</h3>
       <p className="muted">Model endpoints used across the review pipeline.</p>
       {FIELDS.map((f) => (

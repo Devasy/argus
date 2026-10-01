@@ -60,7 +60,7 @@ function PeopleOverview() {
       {sources.error && <ErrorBox message={sources.error.message} onRetry={sources.refetch} />}
       {sources.data && (
         <div className="donut-row">
-          <div className="ui-card">
+          <div className="nw-card">
             <DonutChart
               title="Replies to MM (bot comments)"
               segments={[
@@ -70,7 +70,7 @@ function PeopleOverview() {
               ]}
             />
           </div>
-          <div className="ui-card">
+          <div className="nw-card">
             <DonutChart
               title="Replies to human reviewers"
               segments={[
@@ -88,7 +88,7 @@ function PeopleOverview() {
       {stats.data && (
         <>
           <div className="table-wrap">
-            <table className="ui-table">
+            <table className="nw-table">
               <thead>
                 <tr>
                   <th rowSpan={2}>Person</th>
@@ -135,7 +135,7 @@ export default function PeoplePage() {
   const me = useMe();
 
   return (
-    <div className="ui-fade">
+    <div className="nw-fade">
       <div className="page-head">
         <div>
           <h1>People</h1>
@@ -157,7 +157,7 @@ export default function PeoplePage() {
       </div>
       {me.isPending && <div className="spinner">Checking access…</div>}
       {me.data && me.data.role !== "admin" && (
-        <div className="ui-card" style={{ maxWidth: 420 }}>
+        <div className="nw-card" style={{ maxWidth: 420 }}>
           <strong>Admins only</strong>
           <p className="muted">
             This view needs an admin-role token. Log in with one via the token page if you have

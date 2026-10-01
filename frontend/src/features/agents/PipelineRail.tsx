@@ -8,7 +8,7 @@ const STAGES = [
 
 export default function PipelineRail() {
   return (
-    <div className="ui-card" style={{ padding: "14px 16px", marginBottom: 14 }}>
+    <div className="nw-card" style={{ padding: "14px 16px", marginBottom: 14 }}>
       <div className="muted" style={{ marginBottom: 8, fontSize: 11 }}>
         PIPELINE TOPOLOGY
       </div>

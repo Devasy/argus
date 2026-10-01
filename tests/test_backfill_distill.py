@@ -41,3 +41,23 @@ async def test_find_qualifying_mrs_filters_merged_with_human_notes(db):
     results = await find_qualifying_mrs(db, repo_id=repo.id)
     result_ids = {mr.id for mr in results}
     assert result_ids == {merged_with_human.id}  # not merged_no_notes, not open_with_human
+
+
+async def test_backfill_enqueues_only_bot_threads_when_asked(db, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select
+    from argus.domain.models import Job
+    from argus.knowledge.backfill_distill import enqueue_backfill
+    from tests.distill_helpers import _mr_disc, _note, _resolved_bot_thread
+    _, mr, disc = await _mr_disc(db)
+    mr.state = "merged"
+    await _note(db, mr, disc, "human", "prefer pathlib", 0)
+    bot_disc = await _resolved_bot_thread(db, mr)
+    await db.flush()
+
+    n = await enqueue_backfill(db, [mr], bot_threads_only=True,
+                               now=datetime.now(timezone.utc) + timedelta(hours=1))
+    jobs = (await db.execute(select(Job).where(Job.kind == "distill_mr"))).scalars().all()
+    assert n == 1
+    assert [j.payload["discussion_ids"] for j in jobs if j.payload["mr_id"] == str(mr.id)] \
+        == [[str(bot_disc.id)]]

@@ -80,7 +80,7 @@ export default function AuditQueue() {
       {error && <ErrorBox message={error.message} onRetry={refetch} />}
 
       {data && items.length === 0 && (
-        <div className="ui-card" style={{ padding: 24, textAlign: "center" }}>
+        <div className="nw-card" style={{ padding: 24, textAlign: "center" }}>
           <p className="muted">
             {showNoAction
               ? "No proposed verdicts awaiting review."
@@ -92,7 +92,7 @@ export default function AuditQueue() {
       {items.map((v) => {
         const manual = needsManualResolution(v);
         return (
-          <div className="ui-card learning-card" key={v.id} style={{ marginBottom: 14 }}>
+          <div className="nw-card learning-card" key={v.id} style={{ marginBottom: 14 }}>
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <b>{v.learning_topic ?? v.learning_id}</b>
               <span className={`badge ${VERDICT_COLOR[v.verdict]}`}>{VERDICT_LABEL[v.verdict]}</span>
@@ -128,7 +128,7 @@ export default function AuditQueue() {
 
             {manual && v.related_learning_id && (
               <div className="row" style={{ gap: 12, alignItems: "stretch", marginTop: 8 }}>
-                <div className="ui-card" style={{ flex: 1, padding: 10 }}>
+                <div className="nw-card" style={{ flex: 1, padding: 10 }}>
                   <div className="muted" style={{ fontSize: 11 }}>
                     This learning
                   </div>
@@ -136,7 +136,7 @@ export default function AuditQueue() {
                     {v.learning_id}
                   </div>
                 </div>
-                <div className="ui-card" style={{ flex: 1, padding: 10 }}>
+                <div className="nw-card" style={{ flex: 1, padding: 10 }}>
                   <div className="muted" style={{ fontSize: 11 }}>
                     Related learning
                   </div>
@@ -152,13 +152,13 @@ export default function AuditQueue() {
                 used to be silent no-ops. */}
             {v.suggested_hint_text && (
               <div className="row" style={{ gap: 12, alignItems: "stretch", marginTop: 10 }}>
-                <div className="ui-card" style={{ flex: 1, padding: 10 }}>
+                <div className="nw-card" style={{ flex: 1, padding: 10 }}>
                   <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>
                     Current wording
                   </div>
                   <div style={{ fontSize: 12.5 }}>{v.current_hint_text ?? "—"}</div>
                 </div>
-                <div className="ui-card" style={{ flex: 1, padding: 10 }}>
+                <div className="nw-card" style={{ flex: 1, padding: 10 }}>
                   <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>
                     Proposed wording {v.proposed_action === "merge" ? "(for the survivor)" : ""}
                   </div>
@@ -177,7 +177,7 @@ export default function AuditQueue() {
                     <div className="fileref mono" style={{ fontSize: 11.5 }}>
                       {c.file}:{c.line}
                     </div>
-                    <pre className="ui-card" style={{ padding: 8, marginTop: 4 }}>
+                    <pre className="nw-card" style={{ padding: 8, marginTop: 4 }}>
                       {c.quote}
                     </pre>
                   </div>

@@ -87,7 +87,7 @@ export default function ProxiesSection() {
       {toggleProxy.error && <ErrorBox message={toggleProxy.error.message} />}
       {proxies.data && (
         <div className="table-wrap">
-          <table className="ui-table">
+          <table className="nw-table">
             <thead>
               <tr>
                 <th>Reviewer</th>

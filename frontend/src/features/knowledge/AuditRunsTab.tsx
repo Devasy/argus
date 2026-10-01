@@ -1,10 +1,14 @@
-import { useState } from "react";
-import { useAuditRunTrace, useAuditRuns } from "../../api/queries";
+import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+import { useAuditRunTrace, useAuditRuns, useRepositories } from "../../api/queries";
 import type { AuditRun } from "../../api/types";
 import ErrorBox from "../../components/ErrorBox";
+import FilterBuilder from "../../components/FilterBuilder";
 import PaginationBar from "../../components/PaginationBar";
 import StatusBadge from "../../components/StatusBadge";
 import TraceTables from "../../components/TraceTables";
+import { buildQueryParams, type Condition } from "../../components/filterConditions";
+import { auditRunsFilterFields } from "./auditRunsFilterFields";
 
 function fmtDuration(run: AuditRun): string {
   const start = run.started_at ?? run.created_at;
@@ -41,20 +45,48 @@ function RunTrace({ runId }: { runId: string }) {
 }
 
 export default function AuditRunsTab() {
+  const [draftConditions, setDraftConditions] = useState<Condition[]>([]);
+  const [conditions, setConditions] = useState<Condition[]>([]);
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(20);
   const [openId, setOpenId] = useState<string | null>(null);
-  const { data, isPending, error, refetch } = useAuditRuns(undefined, page, perPage);
+  const repos = useRepositories(1, 200);
+
+  const fields = useMemo(
+    () => auditRunsFilterFields((repos.data?.items ?? []).map((r) => ({ value: r.id, label: r.project_path }))),
+    [repos.data],
+  );
+  const conditionParams = useMemo(() => buildQueryParams(fields, conditions), [fields, conditions]);
+  const repoId = typeof conditionParams.repo_id === "string" ? conditionParams.repo_id : undefined;
+
+  const { data, isPending, error, refetch } = useAuditRuns(repoId, page, perPage);
 
   const items = data?.items ?? [];
 
   return (
     <div>
+      <form
+        className="nw-card"
+        style={{ marginBottom: 14 }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          setConditions(draftConditions);
+          setPage(1);
+        }}
+      >
+        <FilterBuilder fields={fields} conditions={draftConditions} onChange={setDraftConditions} />
+        <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
+          <button type="submit" className="btn-p">
+            Apply filters
+          </button>
+        </div>
+      </form>
+
       {isPending && <div className="spinner">Loading audit runs…</div>}
       {error && <ErrorBox message={error.message} onRetry={refetch} />}
 
       {data && items.length === 0 && (
-        <div className="ui-card" style={{ padding: 24, textAlign: "center" }}>
+        <div className="nw-card" style={{ padding: 24, textAlign: "center" }}>
           <p className="muted">
             No audit runs yet. Start one from Settings → Learning auditor.
           </p>
@@ -64,11 +96,16 @@ export default function AuditRunsTab() {
       {items.map((r) => {
         const open = openId === r.id;
         return (
-          <div className="ui-card" key={r.id} style={{ marginBottom: 12, padding: 12 }}>
+          <div className="nw-card" key={r.id} style={{ marginBottom: 12, padding: 12 }}>
             <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
               <StatusBadge status={r.status} />
-              <b>{r.repo_path ?? r.repo_id}</b>
+              <b>
+                <Link to={`/audit-runs/${r.id}`}>{r.repo_path ?? r.repo_id}</Link>
+              </b>
               <span className="badge">{fmtDuration(r)}</span>
+              <span className="badge">
+                {r.grounded_count}/{r.planned_count} checked
+              </span>
               <span className="badge">{r.verdicts_written} verdict(s)</span>
               {r.audited_ref && (
                 <span className="muted" style={{ fontSize: 11.5 }}>
@@ -92,7 +129,10 @@ export default function AuditRunsTab() {
 
             {r.error && <ErrorBox message={r.error} />}
 
-            <div className="row" style={{ marginTop: 8 }}>
+            <div className="row" style={{ marginTop: 8, gap: 8 }}>
+              <Link className="btn-o" to={`/audit-runs/${r.id}`}>
+                View pipeline
+              </Link>
               <button className="btn-o" onClick={() => setOpenId(open ? null : r.id)}>
                 {open ? "Hide trace" : "Show trace"}
               </button>

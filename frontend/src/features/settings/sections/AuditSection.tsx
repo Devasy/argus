@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import ErrorBox from "../../../components/ErrorBox";
 import SaveBar from "../../../components/SaveBar";
 import Toggle from "../../../components/Toggle";
@@ -13,8 +14,10 @@ import { useDirtyForm } from "../useDirtyForm";
 const FIELDS = [
   "audit_enabled",
   "audit_interval_days",
-  "audit_max_clusters",
+  "audit_learnings_per_run",
+  "audit_max_parallel",
   "audit_auto_apply",
+  "audit_auto_archive_min_pct",
 ] as const;
 
 export default function AuditSection() {
@@ -24,7 +27,7 @@ export default function AuditSection() {
   const repos = useRepositories(1, 100);
   const trigger = useTriggerAudit();
   const [repoId, setRepoId] = useState("");
-  const [ran, setRan] = useState<string | null>(null);
+  const [ranRunId, setRanRunId] = useState<string | null>(null);
   useEffect(() => {
     if (data) {
       const slice: Record<string, number | boolean> = {};
@@ -50,11 +53,12 @@ export default function AuditSection() {
   };
 
   return (
-    <div className="ui-card set-card">
+    <div className="nw-card set-card">
       <h3>Learning auditor</h3>
       <p className="muted">
-        Periodic agentic pass that checks stored team learnings against the real codebase and
-        proposes archive/merge actions for review — never applies anything automatically.
+        Continuous agentic pass that checks due learnings (never checked, checked against code
+        that's since changed, or overdue) against the real codebase and proposes archive/merge
+        actions for review.
       </p>
       <div className="f-row">
         <div className="fl">
@@ -72,8 +76,8 @@ export default function AuditSection() {
       </div>
       <div className="f-row">
         <div className="fl">
-          <b>Audit interval</b>
-          <span>days between audits for a given repo</span>
+          <b>Re-check a learning after (days)</b>
+          <span>a learning not checked for this many days becomes due again</span>
         </div>
         <input
           type="number"
@@ -83,27 +87,48 @@ export default function AuditSection() {
       </div>
       <div className="f-row">
         <div className="fl">
-          <b>Max clusters per run</b>
-          <span>caps LLM spend per repo per audit pass</span>
+          <b>Learnings checked per run</b>
+          <span>
+            caps LLM spend per run; the scheduler keeps queueing runs while more are due
+          </span>
         </div>
         <input
           type="number"
-          value={String(form.draft.audit_max_clusters ?? "")}
-          onChange={(e) => form.set("audit_max_clusters", Number(e.target.value))}
+          value={String(form.draft.audit_learnings_per_run ?? "")}
+          onChange={(e) => form.set("audit_learnings_per_run", Number(e.target.value))}
+        />
+      </div>
+      <div className="f-row">
+        <div className="fl">
+          <b>Concurrent model calls</b>
+          <span>GPU 2 has 2 slots and distillation uses one — usually 1</span>
+        </div>
+        <input
+          type="number"
+          value={String(form.draft.audit_max_parallel ?? "")}
+          onChange={(e) => form.set("audit_max_parallel", Number(e.target.value))}
         />
       </div>
       <div className="f-row">
         <div className="fl">
           <b>Auto-apply verdicts</b>
-          <span>
-            when off (recommended), verdicts only ever propose — a human approves every
-            archive/merge in the Audit queue tab
-          </span>
+          <span>archive automatically when verify agrees and confidence ≥ threshold</span>
         </div>
         <Toggle
           checked={Boolean(form.draft.audit_auto_apply)}
           onChange={(v) => form.set("audit_auto_apply", v)}
           label="Auto-apply verdicts"
+        />
+      </div>
+      <div className="f-row">
+        <div className="fl">
+          <b>Auto-archive confidence threshold (%)</b>
+          <span>only used while auto-apply is on; everything else still waits for a human</span>
+        </div>
+        <input
+          type="number"
+          value={String(form.draft.audit_auto_archive_min_pct ?? "")}
+          onChange={(e) => form.set("audit_auto_archive_min_pct", Number(e.target.value))}
         />
       </div>
       {save.error ? <ErrorBox message={save.error.message} /> : null}
@@ -118,9 +143,9 @@ export default function AuditSection() {
         <div className="fl">
           <b>Run an audit now</b>
           <span>
-            audits one repository immediately instead of waiting for its interval. Runs
-            synchronously and can take several minutes on a large repo; verdicts appear in the
-            Audit queue as proposals.
+            queues an audit for one repository immediately instead of waiting for its due
+            learnings to accumulate. Runs on its own worker lane; watch its progress on the run
+            page.
           </span>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -136,23 +161,22 @@ export default function AuditSection() {
             className="btn"
             disabled={!repoId || trigger.isPending}
             onClick={() => {
-              setRan(null);
+              setRanRunId(null);
               trigger.mutate([repoId], {
-                onSuccess: (res) =>
-                  setRan(
-                    res.status === "done"
-                      ? `Audited ${res.clusters ?? 0} cluster(s), ${res.verdicts ?? 0} verdict(s).`
-                      : `Audit ${res.status}.`,
-                  ),
+                onSuccess: (res) => setRanRunId(res.audit_run_id),
               });
             }}
           >
-            {trigger.isPending ? "Auditing…" : "Run audit"}
+            {trigger.isPending ? "Queueing…" : "Run audit"}
           </button>
         </div>
       </div>
       {trigger.error ? <ErrorBox message={trigger.error.message} /> : null}
-      {ran ? <p className="muted">{ran}</p> : null}
+      {ranRunId ? (
+        <p className="muted">
+          Queued. <Link to={`/audit-runs/${ranRunId}`}>Watch this run</Link>.
+        </p>
+      ) : null}
     </div>
   );
 }
