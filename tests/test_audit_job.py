@@ -114,13 +114,23 @@ async def test_a_setup_failure_before_the_pipeline_starts_still_marks_the_run_fa
     from argus.knowledge.audit_job import run_audit_job
     from tests.distill_helpers import purge_repos
 
+    from sqlalchemy import select, update
+
     sf = session_factory(engine)
+    saved_default_ids = []
     async with sf() as s:
         # No default LLMEndpoint must exist, so distill_llm_config's
         # resolve_llm_config(session, None, None) raises ValueError before any
         # workspace/checkpoint work starts -- regardless of what sibling tests
         # in the shared session-scoped DB left behind.
-        await s.execute(delete(LLMEndpoint).where(LLMEndpoint.is_default == True))  # noqa: E712
+        res = await s.execute(select(LLMEndpoint.id).where(LLMEndpoint.is_default == True))  # noqa: E712
+        saved_default_ids = list(res.scalars().all())
+        if saved_default_ids:
+            await s.execute(
+                update(LLMEndpoint)
+                .where(LLMEndpoint.id.in_(saved_default_ids))
+                .values(is_default=False)
+            )
         repo = Repository(provider="gitlab", project_path=f"g/aj-setup-fail-{uuid.uuid4().hex[:6]}",
                           gitlab_project_id=int(uuid.uuid4().int % 10**8), enabled=True)
         s.add(repo)
@@ -137,4 +147,12 @@ async def test_a_setup_failure_before_the_pipeline_starts_still_marks_the_run_fa
             assert row.status == "failed"
             assert row.error
     finally:
+        if saved_default_ids:
+            async with sf() as s:
+                await s.execute(
+                    update(LLMEndpoint)
+                    .where(LLMEndpoint.id.in_(saved_default_ids))
+                    .values(is_default=True)
+                )
+                await s.commit()
         await purge_repos(engine, [repo_id])

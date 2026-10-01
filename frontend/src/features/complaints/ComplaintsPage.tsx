@@ -141,7 +141,7 @@ export default function ComplaintsPage() {
       )}
 
       <form
-        className="nw-card"
+        className="ui-card"
         style={{ marginBottom: 14 }}
         onSubmit={(e) => {
           e.preventDefault();

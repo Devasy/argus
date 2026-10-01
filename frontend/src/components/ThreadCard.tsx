@@ -54,7 +54,7 @@ function EventRow({ event }: { event: CodeEvent }) {
 
 export default function ThreadCard({ thread }: { thread: Thread }) {
   return (
-    <div className="nw-card thread-card">
+    <div className="ui-card thread-card">
       <div className="flex-between thread-head">
         <div className="row" style={{ gap: 8 }}>
           <span className="mono">{thread.anchor}</span>

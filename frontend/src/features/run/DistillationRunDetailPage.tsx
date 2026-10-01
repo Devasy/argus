@@ -39,7 +39,7 @@ export default function DistillationRunDetailPage() {
       {d.error && <ErrorBox message={d.error} />}
       <h4 className="section">Threads ({d.threads.length})</h4>
       <div className="table-wrap section">
-        <table className="nw-table">
+        <table className="ui-table">
           <thead>
             <tr>
               <th>Type</th>

@@ -56,12 +56,15 @@ export function buildQueryParams(
   conditions: Condition[],
 ): Record<string, string | number | boolean> {
   const params: Record<string, string | number | boolean> = {};
+  const seenFields = new Set<string>();
   for (const c of conditions) {
+    if (seenFields.has(c.field)) continue;
     const field = fieldFor(fields, c.field);
     if (!field) continue;
     const op = operatorFor(field, c.operator);
     if (!op) continue;
     if (op.needsValue && c.value === "") continue;
+    seenFields.add(c.field);
     Object.assign(params, op.toParams(c.value));
   }
   return params;

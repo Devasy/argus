@@ -110,7 +110,7 @@ export default function ReviewTuningSection() {
   };
 
   return (
-    <div className="nw-card set-card">
+    <div className="ui-card set-card">
       <h3>Review tuning</h3>
       <p className="muted">
         Bounds every review run. Changes apply to the next run — running reviews keep the values

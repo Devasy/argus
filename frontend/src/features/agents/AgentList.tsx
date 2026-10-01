@@ -15,7 +15,7 @@ export default function AgentList() {
   if (agents.error) return <ErrorBox message={agents.error.message} onRetry={agents.refetch} />;
 
   return (
-    <div className="nw-card" style={{ padding: 10 }}>
+    <div className="ui-card" style={{ padding: 10 }}>
       {agents.data!.items.map((a) => (
         <Link
           key={a.id}

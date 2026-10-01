@@ -11,7 +11,7 @@ export default function TraceTables({ toolCalls, llmRounds }: Props) {
     <>
       <h4 className="section">Tool calls ({toolCalls.length})</h4>
       <div className="table-wrap section">
-        <table className="nw-table">
+        <table className="ui-table">
           <thead>
             <tr>
               <th>#</th>
@@ -44,7 +44,7 @@ export default function TraceTables({ toolCalls, llmRounds }: Props) {
 
       <h4 className="section">LLM rounds ({llmRounds.length})</h4>
       <div className="table-wrap section">
-        <table className="nw-table">
+        <table className="ui-table">
           <thead>
             <tr>
               <th>#</th>

@@ -24,9 +24,12 @@ export default function FilterBuilder({
   const pickerRef = useRef<HTMLDivElement>(null);
   useClickOutside(pickerRef, () => setPickerOpen(false));
 
+  const usedFields = useMemo(() => new Set(conditions.map((c) => c.field)), [conditions]);
+
   const grouped = useMemo(() => {
     const q = pickerQuery.trim().toLowerCase();
-    const matching = q ? fields.filter((f) => f.label.toLowerCase().includes(q)) : fields;
+    const available = fields.filter((f) => !usedFields.has(f.key));
+    const matching = q ? available.filter((f) => f.label.toLowerCase().includes(q)) : available;
     const byGroup = new Map<string, FieldDef[]>();
     for (const f of matching) {
       const list = byGroup.get(f.group) ?? [];
@@ -34,7 +37,7 @@ export default function FilterBuilder({
       byGroup.set(f.group, list);
     }
     return byGroup;
-  }, [fields, pickerQuery]);
+  }, [fields, pickerQuery, usedFields]);
 
   function addCondition(field: FieldDef) {
     onChange([...conditions, newCondition(field)]);

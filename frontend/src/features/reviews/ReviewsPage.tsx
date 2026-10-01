@@ -113,7 +113,7 @@ export default function ReviewsPage() {
   const s = summary.data;
 
   return (
-    <div className="nw-fade">
+    <div className="ui-fade">
       <div className="page-head">
         <div>
           <h1>Reviews</h1>
@@ -122,7 +122,7 @@ export default function ReviewsPage() {
       </div>
 
       {s && s.queued > 0 && (
-        <div className="nw-card section" style={{ padding: "10px 16px" }}>
+        <div className="ui-card section" style={{ padding: "10px 16px" }}>
           {s.queued} queued · {s.running} running
           {s.avg_duration_s != null && <> · avg review ~{fmtAvg(s.avg_duration_s)}</>}
         </div>
@@ -154,7 +154,7 @@ export default function ReviewsPage() {
 
       {reviews.data && (
         <div className="table-wrap">
-          <table className="nw-table">
+          <table className="ui-table">
             <thead>
               <tr>
                 <th>Merge request</th>

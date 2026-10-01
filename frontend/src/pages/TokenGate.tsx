@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { KeyRound } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { checkHealth, setToken } from "../api/client";
 
 export default function TokenGate() {
@@ -14,15 +15,18 @@ export default function TokenGate() {
     checkHealth().then(setBackendUp);
   }, []);
 
+  const qc = useQueryClient();
+
   const save = () => {
     if (!value.trim()) return;
     setToken(value.trim());
+    qc.invalidateQueries({ queryKey: ["me"] });
     navigate(from, { replace: true });
   };
 
   return (
     <div className="gate">
-      <div className="nw-card form-grid">
+      <div className="ui-card form-grid">
         <div className="row">
           <KeyRound size={18} />
           <h2>argus API token</h2>

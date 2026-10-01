@@ -53,7 +53,7 @@ export default function AuditSection() {
   };
 
   return (
-    <div className="nw-card set-card">
+    <div className="ui-card set-card">
       <h3>Learning auditor</h3>
       <p className="muted">
         Continuous agentic pass that checks due learnings (never checked, checked against code

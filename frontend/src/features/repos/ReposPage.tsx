@@ -41,7 +41,7 @@ export default function Repos() {
   };
 
   return (
-    <div className="nw-fade">
+    <div className="ui-fade">
       <div className="page-head">
         <h1>Repositories</h1>
         <button className="btn-p" onClick={() => setAdding(true)}>
@@ -62,7 +62,7 @@ export default function Repos() {
             {repos.data.items.map((repo) => (
               <div
                 key={repo.id}
-                className="nw-card clickable"
+                className="ui-card clickable"
                 style={{
                   display: "flex",
                   alignItems: "center",

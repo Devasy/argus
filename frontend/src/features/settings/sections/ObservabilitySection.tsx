@@ -38,7 +38,7 @@ export default function ObservabilitySection() {
   };
 
   return (
-    <div className="nw-card set-card">
+    <div className="ui-card set-card">
       <h3>Observability</h3>
       <p className="muted">Tracing and logging configuration for the review pipeline.</p>
       <div className="f-row">

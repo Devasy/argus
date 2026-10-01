@@ -9,7 +9,7 @@ export default function ApiAccessSection() {
   if (error) return <ErrorBox message={error.message} onRetry={refetch} />;
 
   return (
-    <div className="nw-card set-card">
+    <div className="ui-card set-card">
       <h3>API access</h3>
       <p className="muted">
         Every API request (and the WebSocket log stream) is gated behind a bearer token. Read-only —

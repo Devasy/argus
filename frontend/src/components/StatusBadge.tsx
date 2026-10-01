@@ -82,7 +82,7 @@ export default function StatusBadge({ status, label }: { status: string; label?:
   const Icon = cfg.icon;
   return (
     <span className="badge" style={{ background: cfg.bg, color: cfg.color }}>
-      <Icon size={12} className={cfg.spin ? "nw-spin" : undefined} />
+      <Icon size={12} className={cfg.spin ? "ui-spin" : undefined} />
       <span>{label ?? cfg.label}</span>
     </span>
   );

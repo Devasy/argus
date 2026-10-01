@@ -31,7 +31,7 @@ export default function AgentsPage() {
         </div>
         <div>
           {!agentId && (
-            <div className="nw-card" style={{ padding: 24, textAlign: "center" }}>
+            <div className="ui-card" style={{ padding: 24, textAlign: "center" }}>
               <p className="muted">Select an agent to edit its guidelines, or add a new one.</p>
             </div>
           )}
@@ -39,12 +39,12 @@ export default function AgentsPage() {
             <ErrorBox message={agents.error.message} onRetry={agents.refetch} />
           )}
           {agentId && !isCreating && !agents.error && agents.isPending && (
-            <div className="nw-card" style={{ padding: 24, textAlign: "center" }}>
+            <div className="ui-card" style={{ padding: 24, textAlign: "center" }}>
               <p className="muted">Loading agent…</p>
             </div>
           )}
           {notFound && (
-            <div className="nw-card" style={{ padding: 24, textAlign: "center" }}>
+            <div className="ui-card" style={{ padding: 24, textAlign: "center" }}>
               <p className="muted">Agent not found.</p>
             </div>
           )}

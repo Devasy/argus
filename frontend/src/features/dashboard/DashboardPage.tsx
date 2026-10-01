@@ -37,7 +37,7 @@ function StatTile({
   detail: string;
 }) {
   return (
-    <div className="nw-card dash-stat">
+    <div className="ui-card dash-stat">
       <div className="dash-stat-head">
         <span className="dash-stat-icon">
           <Icon size={15} />
@@ -191,7 +191,7 @@ function OpsSection({ ops }: { ops: OpsStats }) {
       </div>
       {ops.jobs_by_kind.length > 0 && (
         <div className="table-wrap">
-          <table className="nw-table">
+          <table className="ui-table">
             <thead>
               <tr>
                 <th>Job kind</th>
@@ -221,7 +221,7 @@ export default function DashboardPage() {
   const t = stats.data?.tiles;
 
   return (
-    <div className="nw-fade">
+    <div className="ui-fade">
       <div className="page-head">
         <div>
           <h1>Dashboard</h1>
@@ -282,14 +282,14 @@ export default function DashboardPage() {
           </div>
 
           <div className="dash-cols">
-            <div className="nw-card section">
+            <div className="ui-card section">
               <div className="flex-between">
                 <strong>Reviews per day</strong>
                 <span className="muted">{days} days</span>
               </div>
               <ReviewsPerDayChart days={stats.data.reviews_per_day} window={days} />
             </div>
-            <div className="nw-card section dash-activity">
+            <div className="ui-card section dash-activity">
               <strong>Recent activity</strong>
               <div className="dash-feed">
                 {stats.data.activity.length === 0 && (
@@ -310,7 +310,7 @@ export default function DashboardPage() {
             <div className="muted">No reviewer agents configured yet.</div>
           ) : (
             <div className="table-wrap">
-              <table className="nw-table">
+              <table className="ui-table">
                 <thead>
                   <tr>
                     <th>Agent</th>

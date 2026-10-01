@@ -155,7 +155,7 @@ export default function MRDetail() {
   };
 
   return (
-    <div className="nw-fade">
+    <div className="ui-fade">
       {detail.error && <ErrorBox message={detail.error.message} onRetry={detail.refetch} />}
       {detail.isPending && <div className="spinner">Loading merge request…</div>}
 
@@ -205,7 +205,7 @@ export default function MRDetail() {
           )}
           {detail.data.reviews.length > 0 && (
             <div className="table-wrap table-scroll">
-              <table className="nw-table">
+              <table className="ui-table">
                 <thead>
                   <tr>
                     <th>Status</th>
@@ -274,7 +274,7 @@ export default function MRDetail() {
           )}
           {detail.data.distillation_runs.length > 0 && (
             <div className="table-wrap table-scroll">
-              <table className="nw-table">
+              <table className="ui-table">
                 <thead>
                   <tr>
                     <th>Status</th>

@@ -33,7 +33,7 @@ export default function PipelineNode({
         : `${spec.allowed}/${spec.produced} kept`;
   return (
     <div
-      className={`pl-node pl-${spec.status}${selected ? " sel" : ""}${spec.status === "running" ? " nw-pulse" : ""}`}
+      className={`pl-node pl-${spec.status}${selected ? " sel" : ""}${spec.status === "running" ? " ui-pulse" : ""}`}
     >
       <Handle type="target" position={Position.Left} className="pl-handle" />
       <div className="pl-head">

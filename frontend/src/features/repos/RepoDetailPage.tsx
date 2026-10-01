@@ -100,7 +100,7 @@ function EditRepoSettings({
   };
 
   return (
-    <div className="nw-card section">
+    <div className="ui-card section">
       {updateRepository.error && <ErrorBox message={updateRepository.error.message} />}
       <div className="f-row">
         <div className="fl">
@@ -214,7 +214,7 @@ export default function RepoDetail() {
   const counts = mrs.data?.state_counts ?? { all: 0, opened: 0, merged: 0, closed: 0 };
 
   return (
-    <div className="nw-fade">
+    <div className="ui-fade">
       <div className="page-head">
         <div>
           <div className="muted">
@@ -271,7 +271,7 @@ export default function RepoDetail() {
 
       {mrs.data && (
         <div className="table-wrap">
-          <table className="nw-table">
+          <table className="ui-table">
             <thead>
               <tr>
                 <th>!IID</th>

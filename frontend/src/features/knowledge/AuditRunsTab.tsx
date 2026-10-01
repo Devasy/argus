@@ -66,7 +66,7 @@ export default function AuditRunsTab() {
   return (
     <div>
       <form
-        className="nw-card"
+        className="ui-card"
         style={{ marginBottom: 14 }}
         onSubmit={(e) => {
           e.preventDefault();
@@ -86,7 +86,7 @@ export default function AuditRunsTab() {
       {error && <ErrorBox message={error.message} onRetry={refetch} />}
 
       {data && items.length === 0 && (
-        <div className="nw-card" style={{ padding: 24, textAlign: "center" }}>
+        <div className="ui-card" style={{ padding: 24, textAlign: "center" }}>
           <p className="muted">
             No audit runs yet. Start one from Settings → Learning auditor.
           </p>
@@ -96,7 +96,7 @@ export default function AuditRunsTab() {
       {items.map((r) => {
         const open = openId === r.id;
         return (
-          <div className="nw-card" key={r.id} style={{ marginBottom: 12, padding: 12 }}>
+          <div className="ui-card" key={r.id} style={{ marginBottom: 12, padding: 12 }}>
             <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
               <StatusBadge status={r.status} />
               <b>

@@ -30,6 +30,7 @@ export interface GraphNodeSpec {
   tokens: number | null; // client-side sum of trace llm_rounds (prompt+completion) for this stage label
   produced: number | null; // candidates emitted by this stage
   allowed: number | null; // verify only: how many survived the gate
+  parentIds?: string[]; // optional explicit incoming dependencies
 }
 
 export const FIXED_STAGES = ["scout", "retrieval", "analyze", "verify", "publish"] as const;
@@ -473,10 +474,29 @@ export function toElkGraph(nodes: GraphNodeSpec[]): ElkGraphShape {
   const layers = layerValues.map((layer) => nodes.filter((n) => n.layer === layer));
 
   const edges: ElkEdgeShape[] = [];
-  for (let i = 0; i + 1 < layers.length; i++) {
-    for (const src of layers[i]) {
-      for (const dst of layers[i + 1]) {
-        edges.push({ id: `e:${src.id}:${dst.id}`, sources: [src.id], targets: [dst.id] });
+  const hasExplicitParents = nodes.some((n) => n.parentIds !== undefined);
+
+  if (hasExplicitParents) {
+    const nodeIds = new Set(nodes.map((n) => n.id));
+    for (const node of nodes) {
+      if (node.parentIds) {
+        for (const parentId of node.parentIds) {
+          if (nodeIds.has(parentId)) {
+            edges.push({
+              id: `e:${parentId}:${node.id}`,
+              sources: [parentId],
+              targets: [node.id],
+            });
+          }
+        }
+      }
+    }
+  } else {
+    for (let i = 0; i + 1 < layers.length; i++) {
+      for (const src of layers[i]) {
+        for (const dst of layers[i + 1]) {
+          edges.push({ id: `e:${src.id}:${dst.id}`, sources: [src.id], targets: [dst.id] });
+        }
       }
     }
   }

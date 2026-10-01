@@ -58,7 +58,7 @@ export default function LearningsTab() {
   );
 
   const listResult = useLearnings({ ...conditionParams, page, per_page: perPage });
-  const searchResult = useLearningsSearch(query, conditionParams);
+  const searchResult = useLearningsSearch(query, { ...conditionParams, page, per_page: perPage });
   const searching = query.trim().length > 0;
   const active = searching ? searchResult : listResult;
 
@@ -93,7 +93,7 @@ export default function LearningsTab() {
           />
         </div>
 
-        <div className="nw-card" style={{ marginBottom: 14, marginTop: 12 }}>
+        <div className="ui-card" style={{ marginBottom: 14, marginTop: 12 }}>
           <FilterBuilder fields={fields} conditions={draftConditions} onChange={setDraftConditions} />
           <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
             <button type="submit" className="btn-p">
@@ -107,13 +107,13 @@ export default function LearningsTab() {
       {active.error && <ErrorBox message={active.error.message} onRetry={active.refetch} />}
 
       {active.data && items.length === 0 && (
-        <div className="nw-card" style={{ padding: 24, textAlign: "center" }}>
+        <div className="ui-card" style={{ padding: 24, textAlign: "center" }}>
           <p className="muted">No learnings match these filters.</p>
         </div>
       )}
 
       {items.map((l) => (
-        <div className="nw-card learning-card" key={l.id}>
+        <div className="ui-card learning-card" key={l.id}>
           <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
             <b>{l.topic}</b>
             <span
@@ -190,11 +190,11 @@ export default function LearningsTab() {
         </div>
       ))}
 
-      {!searching && listResult.data && (
+      {active.data && (
         <PaginationBar
-          page={listResult.data.page}
-          perPage={listResult.data.per_page}
-          total={listResult.data.total}
+          page={active.data.page}
+          perPage={active.data.per_page}
+          total={active.data.total}
           onPageChange={setPage}
           onPerPageChange={(n) => {
             setPerPage(n);

@@ -19,6 +19,14 @@ describe("buildAuditGraphNodes", () => {
     expect(byId["apply"].layer).toBeGreaterThan(byId["verify"].layer);
     const edges = toElkGraph(nodes).edges.map((e) => e.id);
     expect(edges).toContain("e:scout:ground:g1");
+    expect(edges).toContain("e:scout:ground:g2");
+    expect(edges).toContain("e:ground:g1:ground:g1:investigate:1");
+    expect(edges).toContain("e:ground:g1:investigate:1:relate:k1");
+    expect(edges).toContain("e:ground:g2:relate:k1");
+    expect(edges).toContain("e:relate:k1:verify");
+    expect(edges).toContain("e:verify:apply");
+    // Ensure no false cross-group dependency: ground:g2 does NOT connect to g1's investigation
+    expect(edges).not.toContain("e:ground:g2:ground:g1:investigate:1");
     expect(edges).not.toContain("e:pick:apply");
   });
 

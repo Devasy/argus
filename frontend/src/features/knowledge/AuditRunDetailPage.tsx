@@ -17,11 +17,15 @@ export default function AuditRunDetailPage() {
 
   const d = run.data;
   const specs = buildAuditGraphNodes(d.stages);
-  const selectedStage = selectedNode != null ? d.stages.find((s) => s.stage_name === selectedNode) : undefined;
+  const selectedStage =
+    selectedNode != null
+      ? d.stages.find((s) => s.stage_name === `${selectedNode}:retry`) ??
+        d.stages.find((s) => s.stage_name === selectedNode)
+      : undefined;
   const pct = d.planned_count > 0 ? Math.min(100, Math.round((d.grounded_count / d.planned_count) * 100)) : 0;
 
   return (
-    <div className="nw-fade">
+    <div className="ui-fade">
       <div className="page-head">
         <div>
           <div className="muted">
@@ -82,7 +86,7 @@ export default function AuditRunDetailPage() {
           onSelectNode={setSelectedNode}
         />
 
-        <div className="nw-card section" style={{ marginTop: 16 }}>
+        <div className="ui-card section" style={{ marginTop: 16 }}>
           {selectedStage == null ? (
             <p className="muted">Select a node above to see its artifact.</p>
           ) : (

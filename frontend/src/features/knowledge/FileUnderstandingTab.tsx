@@ -47,7 +47,7 @@ export default function FileUnderstandingTab() {
       {(files.data?.items ?? []).map((f) => {
         const isOpen = expanded === f.id;
         return (
-          <div className="nw-card file-accordion" key={f.id}>
+          <div className="ui-card file-accordion" key={f.id}>
             <button
               className="file-accordion-head"
               onClick={() => setExpanded(isOpen ? null : f.id)}

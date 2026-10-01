@@ -88,7 +88,7 @@ export default function AgentEditor({
   };
 
   return (
-    <div className="nw-card" style={{ padding: "18px 20px" }}>
+    <div className="ui-card" style={{ padding: "18px 20px" }}>
       <div className="row" style={{ marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
         <b style={{ fontSize: 16 }}>{agent ? agent.name : "New reviewer agent"}</b>
         {agent?.current_version && (

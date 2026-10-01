@@ -36,7 +36,7 @@ export default function PollerSection() {
   };
 
   return (
-    <div className="nw-card set-card">
+    <div className="ui-card set-card">
       <h3>Poller &amp; worker</h3>
       <p className="muted">
         Controls the background poller that fetches new merge requests from GitLab.

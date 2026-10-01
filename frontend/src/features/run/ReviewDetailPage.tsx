@@ -172,7 +172,7 @@ export default function ReviewDetail() {
     : [];
 
   return (
-    <div className="nw-fade">
+    <div className="ui-fade">
       {review.error && <ErrorBox message={review.error.message} onRetry={() => review.refetch()} />}
       {review.isPending && <div className="spinner">Loading review…</div>}
 
@@ -253,7 +253,7 @@ export default function ReviewDetail() {
                 onSelectNode={setSelectedNode}
               />
 
-              <div className="nw-card section" style={{ marginTop: 16 }}>
+              <div className="ui-card section" style={{ marginTop: 16 }}>
                 {selectedNode == null || selectedTrace == null ? (
                   <p className="muted">Select a node above to see its timeline.</p>
                 ) : (
@@ -286,7 +286,7 @@ export default function ReviewDetail() {
           )}
 
           {activeTab === "summary" && (
-            <div className="nw-card section">
+            <div className="ui-card section">
               <h3>Summary</h3>
               {current.summary ? (
                 <div className="md-body">

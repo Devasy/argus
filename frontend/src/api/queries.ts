@@ -11,7 +11,7 @@ import type {
 } from "./types";
 
 export const queryKeys = {
-  me: ["me"] as const,
+  me: (token?: string | null) => ["me", token ?? ""] as const,
   repositories: (page: number, per_page: number) => ["repositories", page, per_page] as const,
   repository: (id: string) => ["repositories", id] as const,
   mrs: (repoId: string, state: string | undefined, page: number, per_page: number) =>
@@ -360,8 +360,15 @@ export const useAuditRun = (id: string) =>
 // Drives both nav visibility (App.tsx) and whether the admin-only queries
 // below are even attempted -- a single source of truth instead of a second
 // "do I have an admin token" guess living in localStorage.
-export const useMe = () =>
-  useQuery({ queryKey: queryKeys.me, queryFn: api.me, retry: false, staleTime: 60_000 });
+export const useMe = () => {
+  const token = getToken();
+  return useQuery({
+    queryKey: queryKeys.me(token),
+    queryFn: api.me,
+    retry: false,
+    staleTime: 60_000,
+  });
+};
 
 // Admin-only queries. Callers pass `enabled` derived from useMe()'s role so
 // a non-admin session never fires a doomed request.
