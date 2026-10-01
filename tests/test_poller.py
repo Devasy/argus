@@ -1,9 +1,12 @@
 import copy
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from argus.domain.models import MergeRequest, Note, Repository
+from sqlalchemy import delete, select
+
+from argus.domain.models import Job, MergeRequest, MRVersion, Note, Repository
 from argus.ingest.poller import _pending_reconciliation_mr_iids, poll_repo
 
 FIX = Path(__file__).parent / "fixtures" / "gitlab"
@@ -219,6 +222,109 @@ def test_reconciliation_due_only_after_the_cooldown():
     assert reconciliation_due(repo, now + timedelta(hours=2)) is True
 
 
+def test_repo_in_learnings_cooldown_uses_created_at_and_the_per_repo_threshold():
+    from argus.ingest.poller import repo_in_learnings_cooldown
+
+    now = datetime.now(timezone.utc)
+    fresh_repo = Repository(provider="gitlab", project_path="g/p", gitlab_project_id=1,
+                            created_at=now, learnings_cooldown_hours=72)
+    assert repo_in_learnings_cooldown(fresh_repo, now) is True
+    assert repo_in_learnings_cooldown(fresh_repo, now + timedelta(hours=71)) is True
+    assert repo_in_learnings_cooldown(fresh_repo, now + timedelta(hours=73)) is False
+
+    no_cooldown_repo = Repository(provider="gitlab", project_path="g/p2", gitlab_project_id=2,
+                                  created_at=now, learnings_cooldown_hours=0)
+    assert repo_in_learnings_cooldown(no_cooldown_repo, now) is False
+
+
+async def test_distill_mr_not_enqueued_for_a_repo_still_in_learnings_cooldown(db, monkeypatch):
+    """A newly-added repo must not get distill_mr jobs enqueued even when the
+    reconciler surfaces notes to distill -- otherwise a new repo's initial
+    historical backfill would flood the learnings store with noise mined
+    from old, no-longer-relevant discussions."""
+    from argus.ingest import poller as poller_module
+    from argus.ingest.reconciler import ReconcileResult
+
+    calls = []
+
+    async def fake_reconcile_mr(session, client, repo, mr_row, x):
+        return ReconcileResult(changed_note_ids=[])
+
+    async def fake_enqueue(session, mr, now, *, only_bot_threads=False, quiet_hours=24):
+        calls.append(mr.id)
+        return []
+    monkeypatch.setattr(poller_module, "reconcile_mr", fake_reconcile_mr)
+    monkeypatch.setattr(poller_module, "enqueue_ready_threads", fake_enqueue)
+
+    now = datetime.now(timezone.utc)
+    fresh_repo = Repository(provider="gitlab", project_path="g/p8", gitlab_project_id=850,
+                            created_at=now)
+    db.add(fresh_repo)
+    await db.flush()
+
+    await poller_module._sync_and_reconcile_mr(
+        db, FakeClient(), fresh_repo, fx("mr")["iid"], bot_usernames=set(), llm_healthy=True)
+
+    assert calls == []
+
+
+async def test_distill_mr_enqueued_once_learnings_cooldown_has_elapsed(db, monkeypatch):
+    from argus.ingest import poller as poller_module
+    from argus.ingest.reconciler import ReconcileResult
+
+    calls = []
+
+    async def fake_reconcile_mr(session, client, repo, mr_row, x):
+        return ReconcileResult(changed_note_ids=[])
+
+    async def fake_enqueue(session, mr, now, *, only_bot_threads=False, quiet_hours=24):
+        calls.append(mr.id)
+        return []
+    monkeypatch.setattr(poller_module, "reconcile_mr", fake_reconcile_mr)
+    monkeypatch.setattr(poller_module, "enqueue_ready_threads", fake_enqueue)
+
+    now = datetime.now(timezone.utc)
+    old_repo = Repository(provider="gitlab", project_path="g/p9", gitlab_project_id=851,
+                          created_at=now - timedelta(hours=100))
+    db.add(old_repo)
+    await db.flush()
+
+    await poller_module._sync_and_reconcile_mr(
+        db, FakeClient(), old_repo, fx("mr")["iid"], bot_usernames=set(), llm_healthy=True)
+
+    assert len(calls) == 1
+
+
+async def test_the_poller_passes_the_settle_time_setting(db, monkeypatch):
+    from argus.config import Settings
+    from argus.ingest import poller as poller_module
+    from argus.ingest.reconciler import ReconcileResult
+    seen = {}
+
+    async def fake_reconcile_mr(session, client, repo, mr_row, x):
+        return ReconcileResult(changed_note_ids=[])
+
+    async def fake_enqueue(session, mr, now, *, only_bot_threads=False, quiet_hours=24):
+        seen["quiet_hours"] = quiet_hours
+        return []
+
+    async def fake_eff(session, base=None):
+        return Settings(distill_quiet_hours=6)
+    monkeypatch.setattr(poller_module, "reconcile_mr", fake_reconcile_mr)
+    monkeypatch.setattr(poller_module, "enqueue_ready_threads", fake_enqueue)
+    monkeypatch.setattr(poller_module, "load_effective_settings", fake_eff)
+    now = datetime.now(timezone.utc)
+    repo = Repository(provider="gitlab", project_path="g/p10", gitlab_project_id=852,
+                      created_at=now - timedelta(hours=100))
+    db.add(repo)
+    await db.flush()
+
+    await poller_module._sync_and_reconcile_mr(
+        db, FakeClient(), repo, fx("mr")["iid"], bot_usernames=set(), llm_healthy=True)
+
+    assert seen["quiet_hours"] == 6
+
+
 def test_mark_reconciliation_preserves_other_cursor_keys():
     from argus.ingest.poller import mark_reconciliation_ran
 
@@ -275,6 +381,61 @@ async def test_pending_reconciliation_excludes_summary_notes(db):
 
     assert inline_pending_mr.mr_iid in pending
     assert summary_only_mr.mr_iid not in pending
+
+
+async def test_pending_reconciliation_excludes_stale_mrs(db):
+    """An open MR nobody has pushed to in longer than stale_after_days is
+    treated as abandoned and dropped from the pending-reconciliation set,
+    even though it still carries an open bot note -- otherwise it would be
+    re-synced and re-reconciled forever. An MR with no commit history at all
+    (no mr_versions row) is kept: we can't call something stale when we
+    don't know its age."""
+    repo = Repository(provider="gitlab", project_path="g/p7", gitlab_project_id=849)
+    db.add(repo)
+    await db.flush()
+
+    base_mr = fx("mr")
+    now = datetime.now(timezone.utc)
+
+    fresh_mr = MergeRequest(
+        repo_id=repo.id, mr_iid=2001, title=base_mr["title"], state="opened",
+        source_branch=base_mr["source_branch"], target_branch=base_mr["target_branch"],
+        head_sha=base_mr["sha"], web_url=base_mr["web_url"],
+    )
+    stale_mr = MergeRequest(
+        repo_id=repo.id, mr_iid=2002, title=base_mr["title"], state="opened",
+        source_branch=base_mr["source_branch"], target_branch=base_mr["target_branch"],
+        head_sha=base_mr["sha"], web_url=base_mr["web_url"],
+    )
+    no_version_mr = MergeRequest(
+        repo_id=repo.id, mr_iid=2003, title=base_mr["title"], state="opened",
+        source_branch=base_mr["source_branch"], target_branch=base_mr["target_branch"],
+        head_sha=base_mr["sha"], web_url=base_mr["web_url"],
+    )
+    db.add_all([fresh_mr, stale_mr, no_version_mr])
+    await db.flush()
+
+    db.add_all([
+        MRVersion(mr_id=fresh_mr.id, provider_version_id=1,
+                 head_commit_sha="a" * 40, version_created_at=now - timedelta(days=1)),
+        MRVersion(mr_id=stale_mr.id, provider_version_id=2,
+                 head_commit_sha="b" * 40, version_created_at=now - timedelta(days=45)),
+    ])
+    db.add_all([
+        Note(mr_id=fresh_mr.id, provider_note_id=1, author_type="bot",
+            kind="inline", body="x", disposition="open"),
+        Note(mr_id=stale_mr.id, provider_note_id=2, author_type="bot",
+            kind="inline", body="x", disposition="open"),
+        Note(mr_id=no_version_mr.id, provider_note_id=3, author_type="bot",
+            kind="inline", body="x", disposition="open"),
+    ])
+    await db.flush()
+
+    pending = await _pending_reconciliation_mr_iids(db, repo.id, stale_after_days=30)
+
+    assert fresh_mr.mr_iid in pending
+    assert stale_mr.mr_iid not in pending
+    assert no_version_mr.mr_iid in pending
 
 
 class _NoopClient:
@@ -340,3 +501,117 @@ async def test_run_poller_forever_survives_get_interval_failure(engine):
     assert len(calls) >= 2, (
         "poller loop did not survive a raising get_interval "
         f"(get_interval called {len(calls)} time(s))")
+
+
+async def test_poller_syncs_nothing_until_it_knows_its_own_account(engine):
+    # a failed lookup at startup used to sync for the process's lifetime with no bot name,
+    # filing every argus comment as human
+    import asyncio
+    from argus.db import session_factory
+    from argus.ingest.poller import run_poller_forever
+
+    class _FlakyMe(_NoopClient):
+        lookups, listed = 0, 0
+
+        async def get_current_user(self):
+            type(self).lookups += 1
+            if type(self).lookups == 1:
+                raise RuntimeError("DNS")
+            return {"username": "pr_agent"}
+
+        async def list_merge_requests(self, project, updated_after=None, state="all"):
+            type(self).listed += 1
+            return []
+
+    sf = session_factory(engine)
+    async with sf() as session:
+        session.add(Repository(provider="gitlab", project_path="g/flaky", gitlab_project_id=903))
+        await session.commit()
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_poller_forever(sf, _FlakyMe, stop, interval_s=0.05))
+    await asyncio.sleep(0.03)
+    assert _FlakyMe.listed == 0, "synced before knowing which account is argus"
+    await asyncio.sleep(0.2)
+    stop.set()
+    await task
+    async with sf() as session:
+        await session.execute(delete(Repository).where(Repository.gitlab_project_id == 903))
+        await session.commit()
+    assert _FlakyMe.lookups == 2 and _FlakyMe.listed >= 1
+
+
+def test_authors_are_argus_people_or_other_bots():
+    from argus.gitlab.normalizer import classify_author
+    bots = {"pr_agent"}
+    assert classify_author("pr_agent", bots) == "bot"
+    assert classify_author("dev.op", bots) == "human"
+    assert classify_author("developer.one", bots) == "human"
+    assert classify_author("project_571_bot_8c10b9c981c91a557925aa2e40bd9d2c", bots) == "external_bot"
+    assert classify_author("pr_agent", set()) == "external_bot", "never a human, even unresolved"
+
+
+async def test_run_poller_forever_one_repo_failure_does_not_block_others(engine, caplog):
+    """A crash reconciling one repo must not silently skip every repo that
+    comes after it in the same tick. Previously all enabled repos shared one
+    session for the whole tick, so a failure that left that session's
+    transaction unusable (or even just triggered session.rollback(), which
+    expires every attached ORM object) meant the *next* repo's attribute
+    access could raise on its own -- and the resulting secondary crash
+    happened inside the except block's own logging call, escaping the
+    per-repo try/except and aborting the rest of the tick with zero log
+    output for any repo after the first failure."""
+    import asyncio
+    import logging
+    from argus.db import session_factory
+    from argus.ingest.poller import run_poller_forever
+
+    sf = session_factory(engine)
+    async with sf() as session:
+        session.add_all([
+            Repository(provider="gitlab", project_path="g/bad", gitlab_project_id=901),
+            Repository(provider="gitlab", project_path="g/good", gitlab_project_id=902),
+        ])
+        await session.commit()
+
+    class _FailingClient(_NoopClient):
+        async def list_merge_requests(self, project, updated_after=None, state="all"):
+            if project == 901:
+                raise RuntimeError("simulated GitLab error for the bad repo")
+            return []
+
+    stop = asyncio.Event()
+    with caplog.at_level(logging.INFO, logger="argus.poller"):
+        task = asyncio.create_task(
+            run_poller_forever(sf, _FailingClient, stop, interval_s=999))
+        await asyncio.sleep(0.2)
+        stop.set()
+        await task
+
+    messages = [r.message for r in caplog.records]
+    assert any("poll failed for g/bad" in m for m in messages), messages
+    assert any("polled g/good: 0 MRs" in m for m in messages), (
+        "the good repo was never reached/logged after the bad repo's "
+        f"failure in the same tick: {messages}")
+
+
+
+async def test_the_reconciliation_cycle_sweeps_pending_threads(db, monkeypatch):
+    from argus.ingest import poller as poller_module
+    swept = []
+
+    async def fake_sweep(session, repo, now, *, quiet_hours=24):
+        swept.append((repo.id, quiet_hours))
+        return 0
+
+    class _Empty(FakeClient):
+        async def list_merge_requests(self, *a, **k):
+            return []
+    monkeypatch.setattr(poller_module, "sweep_pending_threads", fake_sweep)
+    now = datetime.now(timezone.utc)
+    repo = Repository(provider="gitlab", project_path="g/p11", gitlab_project_id=853,
+                      created_at=now - timedelta(hours=100))
+    db.add(repo)
+    await db.flush()
+
+    await poll_repo(db, _Empty(), repo, bot_usernames=set(), llm_healthy=True)
+    assert [r for r, _ in swept] == [repo.id]

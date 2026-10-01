@@ -304,3 +304,131 @@ async def test_get_file_lines_missing_key_explains_itself(tmp_path):
     ]})
     assert "end" in out and "start" in out
     assert "1 | l1" in out, "a valid range in the same batch must still return"
+
+
+async def test_upsert_learning_tool_refuses_another_repositorys_learning(db, settings, monkeypatch):
+    from argus.db import session_factory
+    from argus.domain.models import Learning, Repository
+    from argus.review.tools import build_learnings_upsert_tool
+
+    async def fake_embed(text, settings_, is_query=False):
+        return [0.7] * 768
+    monkeypatch.setattr(L, "embed_text", fake_embed)
+
+    sf = session_factory(db.bind)
+    async with sf() as s:
+        theirs = Repository(provider="gitlab", project_path="g/upd-tool-theirs",
+                            gitlab_project_id=14)
+        s.add(theirs)
+        await s.flush()
+        foreign = Learning(repo_id=theirs.id, topic="t", hint_text="h", kind="guidance")
+        s.add(foreign)
+        await s.commit()
+        foreign_id, theirs_id = foreign.id, theirs.id
+    try:
+        tool = build_learnings_upsert_tool(sf, settings, repo_id=None)
+        result = await tool.ainvoke({
+            "action": "update", "learning_id": str(foreign_id),
+            "topic": "x", "hint_text": "y", "kind": "guidance"})
+        assert "does not belong" in result
+        async with sf() as s:
+            assert (await s.get(Learning, foreign_id)).hint_text == "h"
+    finally:
+        async with sf() as s:
+            await s.delete(await s.get(Learning, foreign_id))
+            await s.delete(await s.get(Repository, theirs_id))
+            await s.commit()
+
+
+async def test_upsert_learning_tool_updates_by_the_short_id_search_shows(db, settings, monkeypatch):
+    """search_learnings_tool prints id=<8 chars>; every one of 6,679 prod update
+    attempts failed because update demanded a full UUID."""
+    from argus.db import session_factory
+    from argus.domain.models import Learning
+    from argus.review.tools import build_learnings_upsert_tool
+
+    async def fake_embed(text, settings_, is_query=False):
+        return [0.7] * 768
+    monkeypatch.setattr(L, "embed_text", fake_embed)
+
+    sf = session_factory(db.bind)
+    async with sf() as s:
+        l = Learning(repo_id=None, topic="short-id topic", hint_text="old", kind="guidance")
+        s.add(l)
+        await s.commit()
+        lid = l.id
+    try:
+        tool = build_learnings_upsert_tool(sf, settings, repo_id=None)
+        result = await tool.ainvoke({
+            "action": "update", "learning_id": str(lid)[:8],
+            "topic": "short-id topic", "hint_text": "new", "kind": "guidance"})
+        assert "updated" in result.lower()
+        async with sf() as s:
+            assert (await s.get(Learning, lid)).hint_text == "new"
+    finally:
+        async with sf() as s:
+            await s.delete(await s.get(Learning, lid))
+            await s.commit()
+
+
+async def test_report_problem_can_belong_to_a_distillation_run(db, engine):
+    import uuid
+    from sqlalchemy import select
+    from argus.db import session_factory
+    from argus.domain.models import AgentComplaint, DistillationRun, MergeRequest, Repository
+    from argus.review.tools import build_report_problem_tool
+    sf = session_factory(engine)
+    async with sf() as s:
+        repo = Repository(provider="gitlab", project_path=f"g/rp-{uuid.uuid4().hex[:6]}",
+                          gitlab_project_id=int(uuid.uuid4().int % 10**8))
+        s.add(repo)
+        await s.flush()
+        mr = MergeRequest(repo_id=repo.id, mr_iid=1, title="t", state="merged",
+                          source_branch="a", target_branch="b", head_sha="s", web_url="u")
+        s.add(mr)
+        await s.flush()
+        run = DistillationRun(mr_id=mr.id, note_ids=[], status="running")
+        s.add(run)
+        await s.commit()
+    tool = build_report_problem_tool(sf, None, "distill", distillation_run_id=run.id)
+    out = await tool.ainvoke({"category": "tool_broken", "detail": "search ids rejected by update"})
+    assert "recorded" in out
+    async with sf() as s:
+        c = (await s.execute(select(AgentComplaint).where(
+            AgentComplaint.distillation_run_id == run.id))).scalar_one()
+        assert c.review_id is None
+    # test_agent_complaints and others assert over whole tables
+    from tests.distill_helpers import purge_repos
+    await purge_repos(engine, [repo.id])
+
+
+async def test_report_problem_can_belong_to_an_audit_run(db, engine):
+    import uuid
+    from sqlalchemy import delete, select
+    from argus.db import session_factory
+    from argus.domain.models import AgentComplaint, AuditRun, Repository
+    from argus.review.tools import build_report_problem_tool
+    sf = session_factory(engine)
+    async with sf() as s:
+        repo = Repository(provider="gitlab", project_path=f"g/rp-audit-{uuid.uuid4().hex[:6]}",
+                          gitlab_project_id=int(uuid.uuid4().int % 10**8))
+        s.add(repo)
+        await s.flush()
+        run = AuditRun(repo_id=repo.id, status="running")
+        s.add(run)
+        await s.commit()
+        run_id, repo_id = run.id, repo.id
+    try:
+        tool = build_report_problem_tool(sf, None, "audit", audit_run_id=run_id)
+        out = await tool.ainvoke({"category": "tool_broken",
+                                  "detail": "search ids rejected by update"})
+        assert "recorded" in out
+        async with sf() as s:
+            c = (await s.execute(select(AgentComplaint).where(
+                AgentComplaint.audit_run_id == run_id))).scalar_one()
+            assert c.review_id is None
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(delete(AgentComplaint).where(AgentComplaint.audit_run_id == run_id))
+            await conn.execute(delete(AuditRun).where(AuditRun.id == run_id))
+            await conn.execute(delete(Repository).where(Repository.id == repo_id))

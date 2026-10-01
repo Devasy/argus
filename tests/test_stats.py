@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from argus.api.stats import compute_dashboard_stats
-from argus.domain.models import (Learning, MergeRequest, Note, Repository,
+from argus.domain.models import (Finding, Learning, MergeRequest, Note, Repository,
                                      Review, ReviewerAgent,
                                      ReviewerAgentVersion,
                                      ReviewReviewerAgentVersion)
@@ -122,13 +122,10 @@ async def test_dashboard_stats_exclude_dry_run_benchmark_reviews(db):
     assert "(benchmark)" in entry["title"]
 
 
-async def test_dashboard_per_agent_counts_legacy_notes_without_review_id(db):
-    # Notes predating the notes.review_id column (or from a code path that
-    # never set it) have review_id IS NULL. The per-agent breakdown must
-    # still count them against the agent versions that ran on their MR's
-    # review — via the MR-wide join fallback, same as
-    # argus.knowledge.acceptance — instead of silently showing zeros.
-    repo = Repository(provider="gitlab", project_path="g/stats-legacy-p",
+async def test_dashboard_per_agent_counts_only_the_agents_own_notes(db):
+    # A review's analysis-stage comments must not be credited to every
+    # specialist that also ran; attribution goes through Finding.stage.
+    repo = Repository(provider="gitlab", project_path="g/stats-own-notes",
                       gitlab_project_id=9602)
     db.add(repo)
     await db.flush()
@@ -143,7 +140,7 @@ async def test_dashboard_per_agent_counts_legacy_notes_without_review_id(db):
     db.add(review)
     await db.flush()
 
-    agent = ReviewerAgent(name="legacy-agent")
+    agent = ReviewerAgent(name="own-notes-agent")
     db.add(agent)
     await db.flush()
     version = ReviewerAgentVersion(agent_id=agent.id, version=1,
@@ -152,12 +149,48 @@ async def test_dashboard_per_agent_counts_legacy_notes_without_review_id(db):
     await db.flush()
     db.add(ReviewReviewerAgentVersion(review_id=review.id,
                                       agent_version_id=version.id))
-    db.add(Note(mr_id=mr.id, review_id=None, provider_note_id=1,
-               author_type="bot", kind="inline", body="b",
-               disposition="accepted", note_created_at=now))
+    for i, stage in enumerate((agent.name, "analysis"), start=1):
+        note = Note(mr_id=mr.id, review_id=review.id, provider_note_id=i,
+                    author_type="bot", kind="inline", body="b",
+                    disposition="accepted", note_created_at=now)
+        db.add(note)
+        await db.flush()
+        db.add(Finding(review_id=review.id, stage=stage, type="issue",
+                       severity="high", confidence=0.9, file_path="a.py", line=1,
+                       title="t", body="b", evidence_quote="q",
+                       verdict_valid=True, published_note_id=note.id))
     await db.flush()
 
     stats = await compute_dashboard_stats(db, days=14)
     row = next(a for a in stats["agents"] if a["agent_id"] == agent.id)
     assert row["comments"] == 1
     assert row["accepted"] == 1
+
+
+async def test_followup_verified_fixes_count_as_accepted_and_separately(db):
+    before = (await compute_dashboard_stats(db, days=14))["tiles"]
+    repo = Repository(provider="gitlab", project_path="g/stats-followup", gitlab_project_id=9401)
+    db.add(repo)
+    await db.flush()
+    mr = MergeRequest(repo_id=repo.id, mr_iid=1, title="t", state="opened", source_branch="s",
+                      target_branch="m", head_sha="abc", web_url="u")
+    db.add(mr)
+    await db.flush()
+    now = datetime.now(timezone.utc)
+    for i, disposition in enumerate(("accepted_by_followup", "accepted_manually")):
+        db.add(Note(mr_id=mr.id, provider_note_id=940100 + i, author_type="bot", kind="inline",
+                    body="x", disposition=disposition, note_created_at=now))
+    await db.flush()
+
+    after = (await compute_dashboard_stats(db, days=14))["tiles"]
+    assert after["accepted"] - before["accepted"] == 2
+    assert after["accepted_by_followup"] - before["accepted_by_followup"] == 1
+
+
+async def test_dashboard_api_exposes_the_followup_count(engine, settings):
+    import httpx
+    from argus.api.app import create_app
+    app = create_app(settings=settings, engine=engine)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        tiles = (await c.get("/stats/dashboard", params={"days": 14})).json()["tiles"]
+    assert "accepted_by_followup" in tiles

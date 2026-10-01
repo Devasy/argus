@@ -11,7 +11,8 @@ from argus.config import Settings
 from argus.domain.models import Actor, InjectionEvent, Learning, MergeRequest
 from argus.knowledge.embeddings import EmbeddingError, embed_text
 from argus.knowledge.lexical import RRF_K, Bm25Index, rrf
-from argus.knowledge.reputation import combined_strength, reputation
+from argus.knowledge.reputation import (combined_strength, reputation,
+                                            reputation_sql_expr)
 
 logger = logging.getLogger("argus.learnings")
 
@@ -46,6 +47,8 @@ async def upsert_learning(session: AsyncSession, settings: Settings, *,
     vec = await embed_text(f"{topic} :: {hint_text}", settings, is_query=False)
     if learning_id is not None:
         learning = await session.get(Learning, learning_id)
+        if learning is None or learning.repo_id != repo_id:
+            raise ValueError(f"learning {learning_id} does not belong to this repository")
         learning.topic = topic
         learning.hint_text = hint_text
         learning.kind = kind
@@ -53,9 +56,13 @@ async def upsert_learning(session: AsyncSession, settings: Settings, *,
         learning.file_paths = file_paths
         learning.metadata_ = metadata
         learning.embedding = vec
-        learning.mr_id = mr_id
-        learning.source_note_id = source_note_id
-        learning.learned_from_actor_id = learned_from_actor_id
+        # a rewrite keeps where the learning came from unless the caller supplies new provenance
+        if mr_id is not None:
+            learning.mr_id = mr_id
+        if source_note_id is not None:
+            learning.source_note_id = source_note_id
+        if learned_from_actor_id is not None:
+            learning.learned_from_actor_id = learned_from_actor_id
         await session.flush()
         return learning
     if vec is not None:
@@ -282,57 +289,177 @@ async def record_hit(session: AsyncSession, learning_id) -> None:
     await session.flush()
 
 
+def _learning_filters(*, repo_id: uuid.UUID | None, scope: str | None,
+                      kind: str | None, kind_not: str | None = None,
+                      status: str | None, status_not: str | None = None,
+                      groundedness_min: float | None, groundedness_max: float | None,
+                      audited: bool | None,
+                      hit_count_min: int | None, harmful_count_min: int | None,
+                      miss_count_min: int | None, no_verdicts: bool | None,
+                      strength_min: float | None, strength_max: float | None,
+                      created_after: datetime | None, created_before: datetime | None,
+                      mr_iid: int | None, learned_from_username: str | None) -> list:
+    """Shared by list_learnings and search_learnings so the filter builder's
+    conditions mean the same thing on both endpoints."""
+    if scope is not None and scope not in ("global", "repo"):
+        raise ValueError("scope must be 'global' or 'repo'")
+    if scope == "repo" and repo_id is None:
+        raise ValueError("scope='repo' requires repo_id")
+
+    filters = []
+    if scope == "global":
+        filters.append(Learning.repo_id.is_(None))
+    elif scope == "repo":
+        filters.append(Learning.repo_id == repo_id)
+    elif repo_id is not None:
+        filters.append(or_(Learning.repo_id == repo_id, Learning.repo_id.is_(None)))
+
+    if kind is not None:
+        filters.append(Learning.kind == kind)
+    if kind_not is not None:
+        filters.append(Learning.kind != kind_not)
+    if status is not None:
+        filters.append(Learning.status == status)
+    if status_not is not None:
+        filters.append(Learning.status != status_not)
+    if audited is True:
+        filters.append(Learning.groundedness.isnot(None))
+    elif audited is False:
+        filters.append(Learning.groundedness.is_(None))
+    if groundedness_min is not None:
+        filters.append(Learning.groundedness >= groundedness_min)
+    if groundedness_max is not None:
+        filters.append(Learning.groundedness <= groundedness_max)
+    if hit_count_min is not None:
+        filters.append(Learning.hit_count >= hit_count_min)
+    if harmful_count_min is not None:
+        filters.append(Learning.harmful_count >= harmful_count_min)
+    if miss_count_min is not None:
+        filters.append(Learning.miss_count >= miss_count_min)
+    if no_verdicts is True:
+        filters.append(Learning.hit_count + Learning.miss_count
+                       + Learning.harmful_count + Learning.ignored_count == 0)
+    elif no_verdicts is False:
+        filters.append(Learning.hit_count + Learning.miss_count
+                       + Learning.harmful_count + Learning.ignored_count > 0)
+    if strength_min is not None or strength_max is not None:
+        strength_expr = reputation_sql_expr(
+            Learning.hit_count, Learning.harmful_count,
+            Learning.ignored_count, Learning.miss_count)
+        if strength_min is not None:
+            filters.append(strength_expr >= strength_min)
+        if strength_max is not None:
+            filters.append(strength_expr <= strength_max)
+    if created_after is not None:
+        filters.append(Learning.created_at >= created_after)
+    if created_before is not None:
+        filters.append(Learning.created_at <= created_before)
+    if mr_iid is not None:
+        filters.append(MergeRequest.mr_iid == mr_iid)
+    if learned_from_username is not None:
+        filters.append(Actor.username == learned_from_username)
+    return filters
+
+
 async def list_learnings(session: AsyncSession, *, repo_id: uuid.UUID | None = None,
-                         kind: str | None = None, status: str | None = None,
+                         scope: str | None = None,
+                         kind: str | None = None, kind_not: str | None = None,
+                         status: str | None = None, status_not: str | None = None,
+                         groundedness_min: float | None = None,
+                         groundedness_max: float | None = None,
+                         audited: bool | None = None,
+                         hit_count_min: int | None = None,
+                         harmful_count_min: int | None = None,
+                         miss_count_min: int | None = None,
+                         no_verdicts: bool | None = None,
+                         strength_min: float | None = None,
+                         strength_max: float | None = None,
+                         created_after: datetime | None = None,
+                         created_before: datetime | None = None,
+                         mr_iid: int | None = None,
+                         learned_from_username: str | None = None,
                          page: int = 1, per_page: int = 50
                          ) -> tuple[list[tuple[Learning, MergeRequest | None, Actor | None]], int]:
     """Returns (rows, total_count), each row a (Learning, MergeRequest|None,
     Actor|None) tuple — the latter two resolved via outerjoin on
     mr_id/learned_from_actor_id, None when either is unset (global learnings,
-    or rows predating this traceability). repo_id=None means no repo filter
-    (all scopes); pass a specific UUID to restrict to that repo OR global
-    (repo_id IS NULL) learnings — i.e. 'what would apply to this repo'.
-    kind/status None = no filter on that dimension."""
-    filters = []
-    if repo_id is not None:
-        filters.append(or_(Learning.repo_id == repo_id, Learning.repo_id.is_(None)))
-    if kind is not None:
-        filters.append(Learning.kind == kind)
-    if status is not None:
-        filters.append(Learning.status == status)
+    or rows predating this traceability). repo_id=None + scope=None means no
+    repo filter (all scopes); repo_id set + scope=None restricts to that repo
+    OR global (repo_id IS NULL) learnings, unchanged from before -- existing
+    callers that never pass scope see identical behavior. scope='global'
+    ignores repo_id and returns only repo_id IS NULL rows; scope='repo'
+    requires repo_id and excludes global rows. Every other filter is None by
+    default (no filter on that dimension); strength_min/max threshold the
+    same Wilson-lower-bound reputation the UI badge shows, computed in SQL via
+    reputation_sql_expr so it can't drift from learning_reputation()."""
+    filters = _learning_filters(
+        repo_id=repo_id, scope=scope, kind=kind, kind_not=kind_not,
+        status=status, status_not=status_not,
+        groundedness_min=groundedness_min, groundedness_max=groundedness_max,
+        audited=audited, hit_count_min=hit_count_min,
+        harmful_count_min=harmful_count_min, miss_count_min=miss_count_min,
+        no_verdicts=no_verdicts, strength_min=strength_min, strength_max=strength_max,
+        created_after=created_after, created_before=created_before,
+        mr_iid=mr_iid, learned_from_username=learned_from_username)
 
+    base = (select(Learning, MergeRequest, Actor)
+           .outerjoin(MergeRequest, Learning.mr_id == MergeRequest.id)
+           .outerjoin(Actor, Learning.learned_from_actor_id == Actor.id)
+           .where(*filters))
     total = (await session.execute(
-        select(func.count(Learning.id)).where(*filters))).scalar_one()
+        select(func.count()).select_from(base.subquery()))).scalar_one()
     rows = (await session.execute(
-        select(Learning, MergeRequest, Actor)
-        .outerjoin(MergeRequest, Learning.mr_id == MergeRequest.id)
-        .outerjoin(Actor, Learning.learned_from_actor_id == Actor.id)
-        .where(*filters)
-        .order_by(Learning.created_at.desc())
+        base.order_by(Learning.created_at.desc())
         .offset((page - 1) * per_page).limit(per_page))).all()
     return [(r[0], r[1], r[2]) for r in rows], total
 
 
 async def search_learnings(session: AsyncSession, settings: Settings, *,
                            query_text: str, repo_id: uuid.UUID | None = None,
+                           scope: str | None = None,
+                           kind: str | None = None, kind_not: str | None = None,
+                           status: str | None = "active", status_not: str | None = None,
+                           groundedness_min: float | None = None,
+                           groundedness_max: float | None = None,
+                           audited: bool | None = None,
+                           hit_count_min: int | None = None,
+                           harmful_count_min: int | None = None,
+                           miss_count_min: int | None = None,
+                           no_verdicts: bool | None = None,
+                           strength_min: float | None = None,
+                           strength_max: float | None = None,
+                           created_after: datetime | None = None,
+                           created_before: datetime | None = None,
+                           mr_iid: int | None = None,
+                           learned_from_username: str | None = None,
                            page: int = 1, per_page: int = 20
                            ) -> tuple[list[tuple[Learning, MergeRequest | None, Actor | None]], int]:
-    """Pure cosine-distance top-K over ALL active learnings (optionally
+    """Pure cosine-distance top-K over active learnings (optionally
     repo-scoped same as list_learnings), no injection-context reranking.
     Returns ([], 0) if embedding the query fails to produce a vector
     (empty/whitespace query_text -> embed_text returns None). Each row is a
     (Learning, MergeRequest|None, Actor|None) tuple, same shape/semantics as
-    list_learnings."""
+    list_learnings. status defaults to 'active' (the historical behavior for
+    callers that never pass it); pass status=None explicitly to search across
+    every status, same meaning as in list_learnings. The other filters mean
+    the same thing as in list_learnings -- see _learning_filters."""
     qvec = await embed_text(query_text, settings, is_query=True)
     if qvec is None:
         return [], 0
-    scope = (or_(Learning.repo_id == repo_id, Learning.repo_id.is_(None))
-             if repo_id is not None else True)
+    filters = _learning_filters(
+        repo_id=repo_id, scope=scope, kind=kind, kind_not=kind_not,
+        status=status, status_not=status_not,
+        groundedness_min=groundedness_min, groundedness_max=groundedness_max,
+        audited=audited, hit_count_min=hit_count_min,
+        harmful_count_min=harmful_count_min, miss_count_min=miss_count_min,
+        no_verdicts=no_verdicts, strength_min=strength_min, strength_max=strength_max,
+        created_after=created_after, created_before=created_before,
+        mr_iid=mr_iid, learned_from_username=learned_from_username)
     dist = Learning.embedding.cosine_distance(qvec).label("d")
     base = (select(Learning, MergeRequest, Actor, dist)
            .outerjoin(MergeRequest, Learning.mr_id == MergeRequest.id)
            .outerjoin(Actor, Learning.learned_from_actor_id == Actor.id)
-           .where(scope, Learning.status == "active", Learning.embedding.isnot(None)))
+           .where(*filters, Learning.embedding.isnot(None)))
 
     total = (await session.execute(
         select(func.count()).select_from(base.subquery()))).scalar_one()

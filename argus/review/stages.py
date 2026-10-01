@@ -695,6 +695,18 @@ def _item_key(name: str, item: object) -> str:
     return json.dumps(item, sort_keys=True, default=str)
 
 
+class _ModelCallGate(AgentMiddleware):
+    """Hold a slot only for the model request itself, so a tool that runs a nested agent never deadlocks."""
+
+    def __init__(self, semaphore):
+        super().__init__()
+        self._sem = semaphore
+
+    async def awrap_model_call(self, request, handler):
+        async with self._sem:
+            return await handler(request)
+
+
 class _ToolErrorGuard(AgentMiddleware):
     """Turns an exception raised by a tool into a ToolMessage instead of
     letting it propagate.
@@ -938,27 +950,27 @@ async def run_stage_agent(model, tools: list, system_prompt: str, user_msg: str,
                           metadata: dict | None = None,
                           context_window: int = 130_000,
                           output_margin: int = 4_000,
-                          max_output_tokens: int | None = None):
+                          max_output_tokens: int | None = None,
+                          model_gate=None):
     from langchain.agents import create_agent
+    middleware = [_ToolErrorGuard(),
+                 _DynamicMaxTokens(context_window, output_margin,
+                                   max_output_tokens=max_output_tokens),
+                 _RoundBudget(max_rounds),
+                 _ToolCallMemory()]
+    if model_gate is not None:
+        middleware.append(_ModelCallGate(model_gate))
     agent = create_agent(
         model, tools, system_prompt=system_prompt,
         response_format=response_model,
-        middleware=[_ToolErrorGuard(),
-                    _DynamicMaxTokens(context_window, output_margin,
-                                      max_output_tokens=max_output_tokens),
-                    _RoundBudget(max_rounds),
-                    _ToolCallMemory()])
+        middleware=middleware)
     config = {"recursion_limit": recursion_limit_for(max_rounds),
              "callbacks": callbacks or [], "metadata": metadata or {}}
     result = await agent.ainvoke({"messages": [("user", user_msg)]}, config=config)
     if "structured_response" not in result:
-        # One forced-convergence retry: append the agent's own (incomplete)
-        # turn plus an explicit directive to stop reasoning and call the
-        # tool immediately. This does NOT re-run from scratch -- the model
-        # keeps whatever it already worked out, it's just told to stop
-        # spending budget on more thinking and commit to an answer.
+        # One forced-convergence retry: the agent's own history (which already starts with user_msg) plus a directive to answer now.
         retry_result = await agent.ainvoke(
-            {"messages": [("user", user_msg), *result["messages"],
+            {"messages": [*result["messages"],
                           ("user", FORCE_CONVERGENCE_DIRECTIVE)]},
             config=config)
         if "structured_response" in retry_result:

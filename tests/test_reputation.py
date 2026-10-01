@@ -1,7 +1,11 @@
 import math
 
+import pytest
+from sqlalchemy import literal, select
+
 from argus.knowledge.reputation import (HARMFUL_WEIGHT, combined_strength,
                                             decay_weight, reputation,
+                                            reputation_sql_expr,
                                             wilson_lower_bound)
 
 
@@ -57,6 +61,24 @@ def test_groundedness_pulls_combined_score():
     high = combined_strength(0.5, 0.9)
     low = combined_strength(0.5, 0.1)
     assert high > 0.5 > low
+
+
+@pytest.mark.parametrize("hit,harmful,ignored,miss", [
+    (0, 0, 0, 0),
+    (5, 0, 0, 0),
+    (0, 0, 0, 10),
+    (20, 0, 2, 1),
+    (1, 8, 10, 4),
+    (200, 1, 5, 10),
+])
+async def test_reputation_sql_expr_matches_python(db, hit, harmful, ignored, miss):
+    # The Learnings filter builder thresholds "strength" in SQL; this must
+    # never drift from the Python formula the UI badge itself uses.
+    expr = reputation_sql_expr(literal(hit), literal(harmful),
+                               literal(ignored), literal(miss))
+    sql_value = (await db.execute(select(expr))).scalar_one()
+    assert math.isclose(sql_value, reputation(hit, harmful, ignored, miss),
+                        abs_tol=1e-9)
 
 
 def test_stale_audit_loses_influence():

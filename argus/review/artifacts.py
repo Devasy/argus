@@ -37,6 +37,10 @@ class Chunk(BaseModel):
     chunk_id: str
     file_ids: list[str]
     lenses: list[str]
+    # Set when one large file is split by size: only these hunks are this chunk's to review.
+    hunk_ids: list[str] | None = None
+    # "2/3" = second of three parts of that file.
+    part: str | None = None
 
 
 class ReviewPlan(BaseModel):
@@ -112,19 +116,25 @@ class TestScenario(BaseModel):
     relevant_files: list[str] = []
 
 
+def _merge_dicts(a: dict, b: dict) -> dict:
+    return {**a, **b}
+
+
 class ReviewState(BaseModel):
     review_id: str
     plan: ReviewPlan | None = None
     findings: Annotated[list[CandidateFinding], operator.add] = []
-    verdicts: list[Verdict] = []
-    compiled: CompiledReview | None = None
     # Grounding outcome from `verify`, propagated explicitly rather than via
     # in-place mutation of CandidateFinding objects (which is fragile across
-    # checkpoint/resume serialize-deserialize round-trips). `verify` runs once
-    # downstream of the `gather` fan-in point, so plain "last write wins"
-    # fields (not operator.add-reduced) are safe here.
-    ungrounded_ids: list[str] = []
-    line_corrections: dict[str, int] = {}
+    # checkpoint/resume serialize-deserialize round-trips). `verify` fans out
+    # one branch per chunk (same Send pattern as `findings` above), each
+    # branch verifying only its own chunk's findings, so these are
+    # operator.add-reduced too -- concurrent branches never share a
+    # finding_id, so plain concatenation/union is safe.
+    verdicts: Annotated[list[Verdict], operator.add] = []
+    compiled: CompiledReview | None = None
+    ungrounded_ids: Annotated[list[str], operator.add] = []
+    line_corrections: Annotated[dict[str, int], _merge_dicts] = {}
     # Fanned out per chunk by qa_chunk (mode="qa_scenarios"), same reduction
     # strategy as `findings` above -- multiple concurrent chunk branches each
     # contribute their own scenarios.

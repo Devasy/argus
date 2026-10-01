@@ -58,3 +58,21 @@ async def test_error_raises(client):
         return_value=httpx.Response(404, json={"message": "404 Not found"}))
     with pytest.raises(httpx.HTTPStatusError):
         await client.get_merge_request(848, 999)
+
+
+@respx.mock
+async def test_list_versions_paginates(client):
+    respx.get(f"{BASE}/api/v4/projects/848/merge_requests/36/versions").mock(
+        side_effect=[
+            httpx.Response(200, json=[{"id": i} for i in range(20)],
+                           headers={"X-Next-Page": "2"}),
+            httpx.Response(200, json=[{"id": 20}, {"id": 21}],
+                           headers={"X-Next-Page": ""}),
+        ])
+    assert len(await client.list_versions(848, 36)) == 22
+
+
+def test_client_retries_failed_connections():
+    c = GitLabClient(BASE, "tok")
+    assert isinstance(c._http._transport, httpx.AsyncHTTPTransport)
+    assert c._http._transport._pool._retries == 2

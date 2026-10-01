@@ -1,11 +1,11 @@
 import asyncio
-import hashlib
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, WebSocket
+from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select
@@ -13,8 +13,10 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from argus.api.auth import Principal, require_role
-from argus.api.schemas import (AuditVerdictOut, AvailableToolOut, DashboardStatsOut,
-                                   DistillationRunOut,
+from argus.api.permissions import permissions_for, require_permission
+from argus.api.schemas import (AuditRunDetailOut, AuditStageOut,
+                                   AuditVerdictOut, AvailableToolOut, DashboardStatsOut,
+                                   DistillationRunOut, DistillThreadOut,
                                    DistillationRunSummaryOut,
                                    FileKnowledgeOut, LearningOut, MergeRequestDetail,
                                    MergeRequestOut, MergeRequestStateCounts, NoteOut,
@@ -43,6 +45,7 @@ from argus.api.schemas import (AuditVerdictOut, AvailableToolOut, DashboardStats
                                    CommentSourceStatsOut,
                                    ReviewerGraphOut, TATStatsOut, UserStatsListOut,
                                    MeOut)
+from argus.api.threads import build_threads
 from argus.api.stats import (compute_comment_source_stats, compute_dashboard_stats,
                                  compute_reviewer_graph, compute_tat_stats,
                                  compute_user_stats)
@@ -53,7 +56,7 @@ from argus.logging_setup import configure_logging
 logger = logging.getLogger("argus.api")
 from argus.settings_store import (apply_settings, load_effective_settings,
                                       read_settings_view)
-from argus.domain.models import (Actor, AuditRun, AuditVerdict, DistillationRun,
+from argus.domain.models import (Actor, AuditRun, AuditStage, AuditVerdict, DistillationRun,
                                      Job, Learning, LLMRound,
                                      MergeRequest,
                                      MRVersion, Note, ProfileVersion, Repository, Review,
@@ -64,7 +67,9 @@ from argus.domain.models import (Actor, AuditRun, AuditVerdict, DistillationRun,
 from argus.gitlab.client import GitLabClient
 from argus.ingest.poller import run_poller_forever
 from argus.jobs.queue import enqueue, run_worker_forever
+from argus.knowledge.distill_threads import enqueue_ready_threads
 from argus.knowledge.acceptance import ACCEPTED, REJECTED, compute_agent_version_acceptance
+from argus.knowledge.audit_job import run_audit_job
 from argus.knowledge.audit_scheduler import run_audit_forever
 from argus.ingest.reconciler import reconcile_mr
 from argus.knowledge.file_knowledge import list_file_knowledge
@@ -135,21 +140,21 @@ def _stage_dict(r: ReviewStage) -> dict:
 
 async def _run_distill_mr_job(sf, settings, payload: dict,
                               endpoint_name: str | None = None) -> None:
-    from argus.domain.models import (Actor, DistillationRun, MergeRequest,
-                                         Note, Repository)
+    from argus.domain.models import DistillationRun, MergeRequest, Repository
     from argus.gitlab.client import GitLabClient
-    from argus.knowledge.agentic_distiller import run_agentic_distillation_for_mr
     from argus.jobs.workers import distill_llm_config
+    from argus.knowledge import agentic_distiller as ad
+    from argus.knowledge.distill_threads import load_threads, payload_discussion_ids
 
     mr_id = uuid.UUID(payload["mr_id"])
-    note_ids = [uuid.UUID(n) for n in payload["note_ids"]]
-
     async with sf() as session:
         mr = await session.get(MergeRequest, mr_id)
         repo = await session.get(Repository, mr.repo_id)
-        notes = (await session.execute(
-            select(Note).where(Note.id.in_(note_ids),
-                               Note.author_type == "human"))).scalars().all()
+        disc_ids = await payload_discussion_ids(session, payload)
+        threads = await load_threads(session, mr, disc_ids) if disc_ids else []
+        if not threads:
+            logger.info("distill job for MR %s has no threads with human notes; skipping", mr_id)
+            return
         llm_cfg = await distill_llm_config(session, endpoint_name)
         # Without this, a single hung connection to the LLM endpoint blocks
         # forever with nothing to recover it -- unlike execute_review_job,
@@ -159,26 +164,31 @@ async def _run_distill_mr_job(sf, settings, payload: dict,
         # time). num_retries on LLMConfig means a timeout here becomes a
         # retry, not a hard failure.
         llm_cfg.timeout = settings.review_llm_timeout_s
-        run = DistillationRun(mr_id=mr_id, note_ids=[str(n) for n in note_ids],
-                              status="running",
+        run = DistillationRun(mr_id=mr_id, status="running",
+                              note_ids=[str(n.id) for t in threads for n in t.human_notes],
                               started_at=datetime.now(timezone.utc))
         session.add(run)
-        await session.flush()
-        run_id = run.id
         await session.commit()
+        run_id = run.id
 
     verify = settings.gitlab_ca_bundle or settings.gitlab_ssl_verify
     gitlab = GitLabClient(settings.gitlab_url, settings.gitlab_token, verify)
     error = None
-    result = None
+    decisions: dict = {}
+    staged: list = []
     try:
-        result = await run_agentic_distillation_for_mr(
-            sf, settings, gitlab, repo, mr, list(notes), llm_cfg,
-            distillation_run_id=run_id)
+        decisions, staged = await ad.run_thread_distillation(
+            sf, settings, gitlab, repo, mr, threads, llm_cfg, distillation_run_id=run_id)
     except Exception as e:
         error = str(e)[:2000]
     finally:
         await gitlab.aclose()
+    # a failed run writes no learnings and marks its threads failed, so they retry within the cap
+    try:
+        await ad.apply_decisions(sf, settings, repo, mr, threads, decisions, staged, run_id)
+    except Exception as e:
+        logger.exception("applying distill decisions for MR %s failed", mr_id)
+        error = error or f"apply failed: {e}"[:2000]
 
     async with sf() as session:
         run = await session.get(DistillationRun, run_id)
@@ -263,15 +273,8 @@ def create_app(settings: Settings | None = None,
                 run_poller_forever(sf, _client, stop, boot.poll_interval_s,
                                    get_interval=_interval))
         if getattr(boot, "audit_enabled", False):
-            async with sf() as session:
-                audit_llm_cfg = await resolve_llm_config(session, None, None)
-            # See the matching comment in _run_distill_mr_job -- this config
-            # is reused for every audit LLM call for the life of the process,
-            # so a missing timeout here is a standing risk, not a one-off.
-            audit_llm_cfg.timeout = boot.review_llm_timeout_s
             app.state.auditor = asyncio.create_task(
-                run_audit_forever(sf, boot, _client, audit_llm_cfg,
-                                  sleep_seconds=3600))
+                run_audit_forever(sf, boot, sleep_seconds=3600))
         if getattr(boot, "worker_enabled", False):
             from argus.jobs.workers import parse_worker_specs, review_handler
 
@@ -290,7 +293,15 @@ def create_app(settings: Settings | None = None,
                     await _run_distill_mr_job(sf, eff, p, endpoint_name=endpoint)
                 return _distill_mr
 
-            factories = {"review": _review_handler, "distill_mr": _distill_handler}
+            def _audit_handler(endpoint: str | None):
+                async def _audit(p):
+                    async with sf() as session:
+                        eff = await load_effective_settings(session, base=settings)
+                    await run_audit_job(sf, eff, p, endpoint)
+                return _audit
+
+            factories = {"review": _review_handler, "distill_mr": _distill_handler,
+                        "audit_repo": _audit_handler}
             specs = parse_worker_specs(settings.worker_specs, list(factories))
             app.state.workers = []
             for spec in specs:
@@ -663,6 +674,7 @@ def create_app(settings: Settings | None = None,
             distillation_run_rows = (await session.execute(
                 select(DistillationRun).where(DistillationRun.mr_id == mr_id)
                 .order_by(DistillationRun.created_at.desc()))).scalars().all()
+            threads = await build_threads(session, mr)
             return MergeRequestDetail(
                 mr=MergeRequestOut(id=mr.id, mr_iid=mr.mr_iid, title=mr.title,
                                    state=mr.state,
@@ -672,6 +684,7 @@ def create_app(settings: Settings | None = None,
                                kind=n.kind, body=n.body, file_path=n.file_path,
                                line=n.line, disposition=n.disposition)
                        for n, u in rows],
+                threads=threads,
                 reviews=[ReviewSummaryOut(
                     id=rev.id, status=rev.status, trigger=rev.trigger,
                     profile_version=f"v{v}" if v is not None else None,
@@ -1011,18 +1024,12 @@ def create_app(settings: Settings | None = None,
                 result = await reconcile_mr(session, client, repo, mr, settings)
             finally:
                 await client.aclose()
-            queued_run = False
-            if result.note_ids:
-                note_id_strs = sorted(str(n) for n in result.note_ids)
-                batch_hash = hashlib.sha256(
-                    ",".join(note_id_strs).encode()).hexdigest()[:16]
-                job = await enqueue(
-                    session, "distill_mr",
-                    {"mr_id": str(mr_id), "note_ids": note_id_strs},
-                    dedup_key=f"distill_mr:{mr_id}:{batch_hash}")
-                queued_run = job is not None
+            eff = await load_effective_settings(session, base=settings)
+            jobs = await enqueue_ready_threads(session, mr, datetime.now(timezone.utc),
+                                               quiet_hours=eff.distill_quiet_hours)
             await session.commit()
-            return {"queued_run": queued_run, "note_count": len(result.note_ids)}
+            return {"queued_runs": len(jobs),
+                    "changed_dispositions": len(result.changed_note_ids)}
 
     @router.get("/reviews", response_model=PaginatedReviews)
     async def list_reviews_route(status: str | None = None,
@@ -1119,7 +1126,29 @@ def create_app(settings: Settings | None = None,
             run = await session.get(DistillationRun, run_id)
             if run is None:
                 raise HTTPException(404)
-            return DistillationRunOut(
+            from argus.domain.models import DistillThread
+            rows = (await session.execute(select(DistillThread).where(
+                DistillThread.distillation_run_id == run_id)
+                .order_by(DistillThread.created_at))).scalars().all()
+            labels: dict = {}
+            if rows:
+                for did, disp in (await session.execute(
+                        select(Note.discussion_id, Note.disposition).where(
+                            Note.discussion_id.in_([r.discussion_id for r in rows]),
+                            Note.author_type == "bot")
+                        .order_by(Note.note_created_at))).all():
+                    labels.setdefault(did, disp)
+            mr = await session.get(MergeRequest, run.mr_id)
+            thread_views = {t.discussion_id: t for t in await build_threads(
+                session, mr, [r.discussion_id for r in rows])} if rows and mr else {}
+            threads = [DistillThreadOut(
+                discussion_id=r.discussion_id, thread_type=r.thread_type, status=r.status,
+                reconciler_label=labels.get(r.discussion_id) if r.thread_type == "bot_thread" else None,
+                reply_verdict=r.reply_verdict, verdict_reason=r.verdict_reason,
+                learning_ids=r.learning_ids or [], decision_reason=r.decision_reason,
+                thread=thread_views.get(r.discussion_id))
+                for r in rows]
+            return DistillationRunOut(threads=threads,
                 id=run.id, mr_id=run.mr_id, status=run.status, trigger=run.trigger,
                 note_ids=run.note_ids, error=run.error,
                 langfuse_trace_id=run.langfuse_trace_id,
@@ -1166,6 +1195,9 @@ def create_app(settings: Settings | None = None,
                 "items": [{
                     "id": str(r.id), "repo_id": str(r.repo_id),
                     "repo_path": path, "status": r.status,
+                    "trigger": r.trigger,
+                    "planned_count": r.planned_count,
+                    "grounded_count": r.grounded_count,
                     "audited_ref": r.audited_ref, "commit_sha": r.commit_sha,
                     "clusters_examined": r.clusters_examined,
                     "verdicts_written": r.verdicts_written,
@@ -1175,6 +1207,31 @@ def create_app(settings: Settings | None = None,
                     "created_at": r.created_at,
                 } for r, path in rows],
                 "total": total, "page": page, "per_page": per_page}
+
+    @router.get("/audit-runs/{run_id}", response_model=AuditRunDetailOut)
+    async def get_audit_run(run_id: uuid.UUID,
+                            principal: Principal = Depends(require_permission("audit.read"))):
+        async with sf() as session:
+            row = (await session.execute(
+                select(AuditRun, Repository.project_path)
+                .outerjoin(Repository, Repository.id == AuditRun.repo_id)
+                .where(AuditRun.id == run_id))).first()
+            if row is None:
+                raise HTTPException(404, "audit run not found")
+            run, repo_path = row
+            stages = (await session.execute(select(AuditStage).where(
+                AuditStage.audit_run_id == run_id
+            ).order_by(AuditStage.started_at))).scalars().all()
+            return AuditRunDetailOut(
+                id=run.id, repo_id=run.repo_id, repo_path=repo_path, status=run.status,
+                trigger=run.trigger, planned_count=run.planned_count,
+                grounded_count=run.grounded_count, verdicts_written=run.verdicts_written,
+                started_at=run.started_at, finished_at=run.finished_at, error=run.error,
+                langfuse_trace_id=run.langfuse_trace_id,
+                stages=[AuditStageOut(stage_name=s.stage_name, status=s.status,
+                                      artifact=s.artifact, error=s.error,
+                                      started_at=s.started_at, finished_at=s.finished_at)
+                       for s in stages])
 
     @router.get("/audit-runs/{run_id}/trace")
     async def get_audit_trace(run_id: uuid.UUID):
@@ -1376,63 +1433,21 @@ def create_app(settings: Settings | None = None,
                 total=total, page=page, per_page=per_page)
 
     @router.post("/repositories/{repo_id}/audit")
-    async def trigger_audit(repo_id: uuid.UUID, max_clusters: int = 20):
-        from argus.knowledge.auditor import run_audit_for_repo
+    async def trigger_audit(repo_id: uuid.UUID,
+                            principal: Principal = Depends(require_permission("audit.run"))):
+        from argus.knowledge.audit_job import enqueue_audit
 
         async with sf() as session:
             repo = await session.get(Repository, repo_id)
             if repo is None:
                 raise HTTPException(404, "repository not found")
-            in_flight = (await session.execute(select(AuditRun).where(
-                AuditRun.repo_id == repo_id, AuditRun.status == "running"
-            ))).scalar_one_or_none()
-            if in_flight is not None:
-                raise HTTPException(409, "an audit run is already in progress for this repo")
-            eff = await load_effective_settings(session, base=settings)
-            try:
-                llm_cfg = await resolve_llm_config(session, None, None)
-            except ValueError as e:
-                raise HTTPException(422, f"no LLM endpoint configured: {e}")
-            llm_cfg.timeout = eff.review_llm_timeout_s
-            run = AuditRun(repo_id=repo_id, status="running",
-                           started_at=datetime.now(timezone.utc))
-            session.add(run)
+            run = await enqueue_audit(session, repo_id, trigger="manual")
+            if run is None:
+                raise HTTPException(409, "an audit is already queued or running")
             await session.commit()
             run_id = run.id
 
-        client = _client()
-        try:
-            result = await run_audit_for_repo(
-                sf, eff, client, repo, llm_cfg,
-                max_clusters=max_clusters, audit_run_id=run_id)
-            # run_audit_for_repo RETURNS a failure (e.g. the workspace clone
-            # failed) rather than raising it, so keying purely off exceptions
-            # recorded status="done" for a run that examined zero clusters and
-            # wrote zero verdicts -- indistinguishable from a repo whose
-            # learnings were all fine.
-            if result.get("status") == "failed":
-                status = "failed"
-                error = f"audit could not run: {result.get('reason', 'unknown')}"
-            else:
-                status, error = "done", None
-        except Exception as e:
-            logger.exception("manual audit trigger failed for repo %s", repo_id)
-            result, status, error = {}, "failed", str(e)[:2000]
-        finally:
-            await client.aclose()
-
-        async with sf() as session:
-            row = await session.get(AuditRun, run_id)
-            row.status = status
-            row.error = error
-            row.clusters_examined = result.get("clusters", 0)
-            row.verdicts_written = result.get("verdicts", 0)
-            row.finished_at = datetime.now(timezone.utc)
-            await session.commit()
-
-        if status == "failed":
-            raise HTTPException(500, f"audit run failed: {error}")
-        return {"audit_run_id": str(run_id), **result}
+        return JSONResponse({"audit_run_id": str(run_id)}, status_code=202)
 
     @router.get("/audit-verdicts", response_model=PaginatedAuditVerdicts)
     async def get_audit_verdicts(state: str = "proposed",
@@ -1490,7 +1505,8 @@ def create_app(settings: Settings | None = None,
                 total=total, page=page, per_page=per_page)
 
     @router.post("/audit-verdicts/{verdict_id}/approve")
-    async def approve_verdict(verdict_id: uuid.UUID):
+    async def approve_verdict(verdict_id: uuid.UUID,
+                              principal: Principal = Depends(require_permission("audit.approve"))):
         from argus.knowledge.audit_apply import apply_verdict
         async with sf() as session:
             v = await session.get(AuditVerdict, verdict_id)
@@ -1499,12 +1515,13 @@ def create_app(settings: Settings | None = None,
             if v.state != "proposed":
                 raise HTTPException(409, f"verdict already {v.state}")
             v.state = "approved"
-            changed = await apply_verdict(session, v, actor="api")
+            changed = await apply_verdict(session, v, actor=principal.label)
             await session.commit()
         return {"ok": True, "applied": changed}
 
     @router.post("/audit-verdicts/{verdict_id}/reject")
-    async def reject_verdict(verdict_id: uuid.UUID):
+    async def reject_verdict(verdict_id: uuid.UUID,
+                             principal: Principal = Depends(require_permission("audit.approve"))):
         async with sf() as session:
             v = await session.get(AuditVerdict, verdict_id)
             if v is None:
@@ -1517,7 +1534,8 @@ def create_app(settings: Settings | None = None,
 
     @router.get("/me", response_model=MeOut)
     async def get_me(principal: Principal = Depends(require_user)):
-        return MeOut(role=principal.role, label=principal.label)
+        return MeOut(role=principal.role, label=principal.label,
+                     permissions=permissions_for(principal.role))
 
     @router.get("/stats/dashboard", response_model=DashboardStatsOut)
     async def get_dashboard_stats(days: int = 14):

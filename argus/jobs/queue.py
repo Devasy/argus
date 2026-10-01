@@ -16,6 +16,26 @@ logger = logging.getLogger("argus.jobs")
 STALE_LEASE_S = 24 * 3600
 MAX_JOB_ATTEMPTS = 3
 
+# Lower number = claimed first, regardless of age. A bulk enqueue at one
+# priority never blocks a higher one -- a 194-job distill_mr backfill queued
+# ahead of 14 waiting review jobs (2026-09) starved review indefinitely under
+# plain FIFO. Same tier still drains oldest-first (see claim_next).
+PRIORITY_REVIEW = 0
+PRIORITY_DISTILL = 10
+# Audit doesn't run through this queue (it's its own interval loop in
+# knowledge/audit_scheduler.py, competing for LLM/API capacity but not a
+# worker slot here); this constant exists so a benchmark dry-run review --
+# which DOES share the "review" job kind with real reviews -- ranks behind
+# both, matching audit's intended tier if it's ever folded into this queue.
+PRIORITY_BENCHMARK_OR_AUDIT = 20
+
+# Only "review" needs a caller-visible default distinct from the fallback:
+# every real call site enqueues a live review at PRIORITY_REVIEW, and the one
+# call site that wants something lower (benchmark/run.py's dry runs) passes
+# its own priority explicitly since it reuses the "review" kind.
+DEFAULT_PRIORITY_BY_KIND = {"review": PRIORITY_REVIEW, "distill_mr": PRIORITY_DISTILL,
+                           "audit_repo": PRIORITY_BENCHMARK_OR_AUDIT}
+
 
 async def reclaim_stale(session: AsyncSession, stale_after_s: int = STALE_LEASE_S,
                         max_attempts: int = MAX_JOB_ATTEMPTS) -> dict[str, int]:
@@ -50,14 +70,16 @@ async def reclaim_stale(session: AsyncSession, stale_after_s: int = STALE_LEASE_
 
 
 async def enqueue(session: AsyncSession, kind: str, payload: dict,
-                  dedup_key: str | None) -> Job | None:
+                  dedup_key: str | None, priority: int | None = None) -> Job | None:
     if dedup_key:
         existing = (await session.execute(select(Job).where(
             Job.dedup_key == dedup_key,
             Job.status.in_(["queued", "running"])))).scalar_one_or_none()
         if existing is not None:
             return None
-    job = Job(kind=kind, payload=payload, dedup_key=dedup_key)
+    if priority is None:
+        priority = DEFAULT_PRIORITY_BY_KIND.get(kind, PRIORITY_BENCHMARK_OR_AUDIT)
+    job = Job(kind=kind, payload=payload, dedup_key=dedup_key, priority=priority)
     session.add(job)
     await session.flush()
     return job
@@ -69,7 +91,7 @@ async def claim_next(session: AsyncSession, worker_id: str,
     job = (await session.execute(
         select(Job).where(Job.status == "queued", Job.kind.in_(kinds),
                           or_(Job.run_after.is_(None), Job.run_after <= now))
-        .order_by(Job.created_at).limit(1)
+        .order_by(Job.priority, Job.created_at).limit(1)
         .with_for_update(skip_locked=True))).scalar_one_or_none()
     if job is None:
         return None

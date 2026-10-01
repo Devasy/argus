@@ -54,18 +54,26 @@ async def distill_llm_config(session, endpoint_name: str | None):
 
 
 def default_specs(known_kinds: list[str]) -> list[WorkerSpec]:
-    return [WorkerSpec(id="w1", kinds=tuple(known_kinds))]
+    # audit_repo is GPU-2-only and explicit-lane-only by design (see the
+    # audit-pipeline plan): unlike review/distill_mr, an audit left uncovered
+    # is meant to queue safely, never fall onto whatever worker the review/
+    # distill fallback happens to also run on (and its default LLM endpoint,
+    # not GPU 2). Every other kind still falls back to one worker so a typo
+    # can't stop reviews.
+    kinds = tuple(k for k in known_kinds if k != "audit_repo")
+    return [WorkerSpec(id="w1", kinds=kinds)]
 
 
 def parse_worker_specs(raw: str, known_kinds: list[str]) -> list[WorkerSpec]:
     """Parse ARGUS_WORKER_SPECS; malformed input logs and falls back to one worker so a typo can't stop reviews."""
     if not raw or not raw.strip():
-        return default_specs(known_kinds)
-    try:
-        specs = _parse(json.loads(raw), known_kinds)
-    except (ValueError, TypeError) as e:
-        logger.error("invalid ARGUS_WORKER_SPECS (%s); falling back to a single worker", e)
-        return default_specs(known_kinds)
+        specs = default_specs(known_kinds)
+    else:
+        try:
+            specs = _parse(json.loads(raw), known_kinds)
+        except (ValueError, TypeError) as e:
+            logger.error("invalid ARGUS_WORKER_SPECS (%s); falling back to a single worker", e)
+            specs = default_specs(known_kinds)
     uncovered = set(known_kinds) - {k for s in specs for k in s.kinds}
     if uncovered:
         logger.warning("no worker claims job kind(s) %s; those jobs will stay queued",

@@ -95,6 +95,21 @@ def test_parse_verdict_handles_json_think_noise_and_garbage():
     assert parse_verdict('{"verdict": "maybe"}')[0] == "unsure"
 
 
+def test_parse_verdict_handles_list_shaped_content_from_a_reasoning_model():
+    """langchain_litellm returns .content as a list of blocks -- not a plain
+    string -- whenever the model ran with reasoning enabled (see
+    _inject_reasoning_content_into_content): a 'thinking' block first, then a
+    'text' block with the actual answer. The thinking block's own text must
+    be ignored, not scanned for a stray {...} that isn't the real verdict."""
+    content = [
+        {"type": "thinking", "thinking": 'musing... maybe {"verdict": "addressed"} but not sure'},
+        {"type": "text", "text": '{"verdict": "not_addressed", "evidence": "still there"}'},
+    ]
+    assert parse_verdict(content) == ("not_addressed", "still there")
+    assert parse_verdict([{"type": "thinking", "thinking": "only thinking, no answer"}])[0] == "unsure"
+    assert parse_verdict([])[0] == "unsure"
+
+
 # ---- reply_body: action table and tone -----------------------------------------------------
 
 def test_reply_table():

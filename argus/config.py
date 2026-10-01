@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     # The distiller searches learnings for every point and reads code, so it
     # needs a budget like scout's, not the hardcoded 10 it used to get.
     distiller_max_rounds: int = 20
+    # hours without a new human note before an open, unresolved thread is distilled; 0 = immediately
+    distill_quiet_hours: int = 24
     qa_scenarios_max_rounds: int = 10
     # Budget for generate_test_scenario, the on-demand tool analyze_chunk (and
     # the specialist agents it invokes) can call mid-review when a specific
@@ -80,8 +82,13 @@ class Settings(BaseSettings):
 
     audit_enabled: bool = False
     audit_interval_days: int = 7
-    audit_max_clusters: int = 20
     audit_auto_apply: bool = False
+    # learnings checked per audit run; the scheduler keeps queueing runs while more are due
+    audit_learnings_per_run: int = 40
+    # concurrent model calls per audit run; GPU 2 has 2 slots and distillation uses one
+    audit_max_parallel: int = 1
+    # verify-confirmed archives at or above this confidence (percent) apply without a human
+    audit_auto_archive_min_pct: int = 80
 
 
 @lru_cache

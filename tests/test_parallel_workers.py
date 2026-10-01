@@ -37,6 +37,17 @@ def test_a_kind_no_worker_claims_is_warned_about(caplog):
     assert "distill_mr" in caplog.text
 
 
+def test_audit_repo_is_never_assigned_to_the_default_fallback_worker(caplog):
+    """audit_repo is GPU-2-only and explicit-lane-only by design: an unset or
+    malformed ARGUS_WORKER_SPECS must leave it queued safely, never silently
+    sharing the review/distill fallback worker (and its default LLM
+    endpoint) the way every other kind does."""
+    with caplog.at_level(logging.WARNING, logger="argus.jobs"):
+        specs = parse_worker_specs("", KINDS + ["audit_repo"])
+    assert specs == [WorkerSpec(id="w1", kinds=("review", "distill_mr"))]
+    assert "audit_repo" in caplog.text
+
+
 async def _review_row(sf, llm_config: dict, tag: str):
     from argus.domain.models import MergeRequest, Repository, Review
     async with sf() as s:

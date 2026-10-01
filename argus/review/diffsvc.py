@@ -58,15 +58,18 @@ def parse_diffs(gitlab_diffs: list[dict]) -> tuple[list[FileChange], dict[str, H
     return files, hunks
 
 
-def _git_diff(repo: Path, base_sha: str, head_sha: str, path: str) -> str:
+def _git_diff(repo: Path, base_sha: str, head_sha: str, path: str,
+              old_path: str | None = None) -> str:
     """Unified diff for ONE path straight from the local clone.
 
     `git diff base...head` (three dots) matches what GitLab shows for an MR:
     changes on the source branch since it forked, ignoring commits that landed
     on the target afterwards. Scoped to a single path so one enormous file
-    cannot blow up the whole backfill."""
+    cannot blow up the whole backfill. For a rename, both paths plus -M let git
+    pair them instead of reporting the new path as a whole-file add."""
+    paths = [old_path, path] if old_path and old_path != path else [path]
     proc = subprocess.run(
-        ["git", "diff", "--no-color", f"{base_sha}...{head_sha}", "--", path],
+        ["git", "diff", "--no-color", "-M", f"{base_sha}...{head_sha}", "--", *paths],
         cwd=repo, capture_output=True, text=True, timeout=60)
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip()[:200] or "git diff failed")
@@ -99,7 +102,7 @@ async def backfill_collapsed_diffs(
         out = []
         for fc in targets:
             try:
-                text = _git_diff(repo, base_sha, head_sha, fc.path)
+                text = _git_diff(repo, base_sha, head_sha, fc.path, fc.old_path)
             except Exception as e:  # missing sha, timeout, binary, ...
                 logger.warning("could not reconstruct diff for %s: %s", fc.path, e)
                 continue

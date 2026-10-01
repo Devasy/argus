@@ -146,6 +146,40 @@ async def test_an_interrupted_job_is_requeued_not_failed(db, engine):
         await s.commit()
 
 
+# --- priority: a bulk enqueue of one kind must not starve another ---------
+
+async def test_review_claims_ahead_of_older_distill_mr_jobs(db):
+    """The reported incident: 194 distill_mr jobs queued ahead of 14 review
+    jobs meant only distills got claimed. review must win regardless of
+    which was enqueued first."""
+    await enqueue(db, "distill_mr", {"mr_id": "older"}, dedup_key="distill_mr:older")
+    await enqueue(db, "review", {"review_id": "newer"}, dedup_key="review:newer")
+
+    job = await claim_next(db, "w1", ["review", "distill_mr"])
+    assert job.kind == "review"
+
+
+async def test_same_priority_still_claims_oldest_first(db):
+    await enqueue(db, "review", {"review_id": "first"}, dedup_key="review:first")
+    await enqueue(db, "review", {"review_id": "second"}, dedup_key="review:second")
+
+    job = await claim_next(db, "w1", ["review"])
+    assert job.payload == {"review_id": "first"}
+
+
+async def test_explicit_priority_overrides_the_kind_default(db):
+    """Benchmark dry runs reuse the "review" kind but must never queue-jump
+    a real review."""
+    from argus.jobs.queue import PRIORITY_BENCHMARK_OR_AUDIT
+
+    await enqueue(db, "review", {"review_id": "dry-run"},
+                 dedup_key="review:dry", priority=PRIORITY_BENCHMARK_OR_AUDIT)
+    await enqueue(db, "review", {"review_id": "real"}, dedup_key="review:real")
+
+    job = await claim_next(db, "w1", ["review"])
+    assert job.payload == {"review_id": "real"}
+
+
 async def test_worker_reclaims_stale_jobs_before_claiming_work(db, engine):
     import asyncio
     from datetime import datetime, timedelta, timezone

@@ -149,6 +149,193 @@ async def test_list_learnings_resolves_source_mr_and_author(db, settings):
     assert untraced_mr is None and untraced_actor is None
 
 
+async def test_list_learnings_filters_by_kind_not_and_status_not(db, settings):
+    from argus.domain.models import Learning
+    from argus.knowledge.learnings import list_learnings
+
+    db.add_all([
+        Learning(repo_id=None, topic="a", hint_text="h", kind="guidance", status="active"),
+        Learning(repo_id=None, topic="b", hint_text="h", kind="do_not_suggest", status="active"),
+        Learning(repo_id=None, topic="c", hint_text="h", kind="guidance", status="archived"),
+    ])
+    await db.flush()
+
+    rows, total = await list_learnings(db, kind_not="do_not_suggest")
+    assert total == 2 and {l.topic for l, mr, actor in rows} == {"a", "c"}
+
+    rows, total = await list_learnings(db, status_not="archived")
+    assert total == 2 and {l.topic for l, mr, actor in rows} == {"a", "b"}
+
+
+async def test_list_learnings_scope_global_excludes_repo_rows(db, settings):
+    from argus.domain.models import Learning, Repository
+    from argus.knowledge.learnings import list_learnings
+
+    repo = Repository(provider="gitlab", project_path="grp/scope-global-test",
+                      gitlab_project_id=90000400)
+    db.add(repo)
+    await db.flush()
+    db.add_all([
+        Learning(repo_id=repo.id, topic="repo-specific", hint_text="h"),
+        Learning(repo_id=None, topic="global", hint_text="h"),
+    ])
+    await db.flush()
+
+    rows, total = await list_learnings(db, repo_id=repo.id, scope="global")
+    assert total == 1
+    assert rows[0][0].topic == "global"
+
+
+async def test_list_learnings_scope_repo_excludes_global_rows(db, settings):
+    from argus.domain.models import Learning, Repository
+    from argus.knowledge.learnings import list_learnings
+
+    repo = Repository(provider="gitlab", project_path="grp/scope-repo-test",
+                      gitlab_project_id=90000401)
+    db.add(repo)
+    await db.flush()
+    db.add_all([
+        Learning(repo_id=repo.id, topic="repo-specific", hint_text="h"),
+        Learning(repo_id=None, topic="global", hint_text="h"),
+    ])
+    await db.flush()
+
+    rows, total = await list_learnings(db, repo_id=repo.id, scope="repo")
+    assert total == 1
+    assert rows[0][0].topic == "repo-specific"
+
+
+async def test_list_learnings_scope_repo_requires_repo_id(db, settings):
+    from argus.knowledge.learnings import list_learnings
+
+    with pytest.raises(ValueError):
+        await list_learnings(db, scope="repo")
+
+
+async def test_list_learnings_filters_by_audited(db, settings):
+    from argus.domain.models import Learning
+    from argus.knowledge.learnings import list_learnings
+
+    db.add_all([
+        Learning(repo_id=None, topic="audited", hint_text="h", groundedness=0.7),
+        Learning(repo_id=None, topic="unaudited", hint_text="h"),
+    ])
+    await db.flush()
+
+    rows, total = await list_learnings(db, audited=True)
+    assert total == 1 and rows[0][0].topic == "audited"
+
+    rows, total = await list_learnings(db, audited=False)
+    assert total == 1 and rows[0][0].topic == "unaudited"
+
+
+async def test_list_learnings_filters_by_groundedness_range(db, settings):
+    from argus.domain.models import Learning
+    from argus.knowledge.learnings import list_learnings
+
+    db.add_all([
+        Learning(repo_id=None, topic="strong", hint_text="h", groundedness=0.8),
+        Learning(repo_id=None, topic="weak", hint_text="h", groundedness=0.2),
+    ])
+    await db.flush()
+
+    rows, total = await list_learnings(db, groundedness_min=0.6)
+    assert total == 1 and rows[0][0].topic == "strong"
+
+    rows, total = await list_learnings(db, groundedness_max=0.4)
+    assert total == 1 and rows[0][0].topic == "weak"
+
+
+async def test_list_learnings_filters_by_no_verdicts(db, settings):
+    from argus.domain.models import Learning
+    from argus.knowledge.learnings import list_learnings
+
+    db.add_all([
+        Learning(repo_id=None, topic="untried", hint_text="h"),
+        Learning(repo_id=None, topic="tried", hint_text="h", hit_count=3),
+    ])
+    await db.flush()
+
+    rows, total = await list_learnings(db, no_verdicts=True)
+    assert total == 1 and rows[0][0].topic == "untried"
+
+    rows, total = await list_learnings(db, no_verdicts=False)
+    assert total == 1 and rows[0][0].topic == "tried"
+
+
+async def test_list_learnings_filters_by_strength_range(db, settings):
+    from argus.domain.models import Learning
+    from argus.knowledge.learnings import list_learnings
+
+    db.add_all([
+        Learning(repo_id=None, topic="performing", hint_text="h", hit_count=25),
+        Learning(repo_id=None, topic="underperforming", hint_text="h", harmful_count=9),
+    ])
+    await db.flush()
+
+    rows, total = await list_learnings(db, strength_min=0.5)
+    assert total == 1 and rows[0][0].topic == "performing"
+
+    rows, total = await list_learnings(db, strength_max=0.4)
+    assert total == 1 and rows[0][0].topic == "underperforming"
+
+
+async def test_list_learnings_filters_by_counts_and_dates(db, settings):
+    from datetime import datetime, timedelta, timezone
+
+    from argus.domain.models import Learning
+    from argus.knowledge.learnings import list_learnings
+
+    old = Learning(repo_id=None, topic="old", hint_text="h", harmful_count=2,
+                  miss_count=1)
+    old.created_at = datetime.now(timezone.utc) - timedelta(days=30)
+    new = Learning(repo_id=None, topic="new", hint_text="h", hit_count=1)
+    db.add_all([old, new])
+    await db.flush()
+
+    rows, total = await list_learnings(db, harmful_count_min=1)
+    assert total == 1 and rows[0][0].topic == "old"
+
+    rows, total = await list_learnings(db, miss_count_min=1)
+    assert total == 1 and rows[0][0].topic == "old"
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=5)
+    rows, total = await list_learnings(db, created_after=cutoff)
+    assert total == 1 and rows[0][0].topic == "new"
+
+    rows, total = await list_learnings(db, created_before=cutoff)
+    assert total == 1 and rows[0][0].topic == "old"
+
+
+async def test_list_learnings_filters_by_mr_iid_and_author(db, settings):
+    from argus.domain.models import Actor, Learning, MergeRequest, Repository
+    from argus.knowledge.learnings import list_learnings
+
+    repo = Repository(provider="gitlab", project_path="grp/mr-author-filter-test",
+                      gitlab_project_id=90000402)
+    db.add(repo)
+    await db.flush()
+    mr = MergeRequest(repo_id=repo.id, mr_iid=55, title="t", state="opened",
+                      source_branch="a", target_branch="b", head_sha="s", web_url="u")
+    db.add(mr)
+    await db.flush()
+    actor = Actor(username="jheel.shah", provider_user_id=101)
+    db.add(actor)
+    await db.flush()
+    db.add_all([
+        Learning(repo_id=None, topic="traced", hint_text="h", mr_id=mr.id,
+                 learned_from_actor_id=actor.id),
+        Learning(repo_id=None, topic="untraced", hint_text="h"),
+    ])
+    await db.flush()
+
+    rows, total = await list_learnings(db, mr_iid=55)
+    assert total == 1 and rows[0][0].topic == "traced"
+
+    rows, total = await list_learnings(db, learned_from_username="jheel.shah")
+    assert total == 1 and rows[0][0].topic == "traced"
+
+
 async def test_list_learnings_pagination(db, settings):
     from argus.domain.models import Learning
     from argus.knowledge.learnings import list_learnings
@@ -488,3 +675,35 @@ async def test_record_injections_still_records_a_newly_added_learning(db, settin
     n = (await db.execute(sa_select(func.count(InjectionEvent.id)).where(
         InjectionEvent.review_id == review.id))).scalar_one()
     assert n == 2
+
+
+async def test_update_refuses_another_repositorys_learning(db, settings, fake_embed):
+    mine = Repository(provider="gitlab", project_path="g/upd-mine", gitlab_project_id=11)
+    theirs = Repository(provider="gitlab", project_path="g/upd-theirs", gitlab_project_id=12)
+    db.add_all([mine, theirs])
+    await db.flush()
+    foreign = Learning(repo_id=theirs.id, topic="t", hint_text="h", kind="guidance")
+    db.add(foreign)
+    await db.flush()
+    with pytest.raises(ValueError, match="does not belong"):
+        await L.upsert_learning(db, settings, repo_id=mine.id, topic="x",
+                                hint_text="y", learning_id=foreign.id)
+    assert foreign.hint_text == "h"
+
+
+async def test_update_without_new_provenance_keeps_the_old(db, settings, fake_embed):
+    from argus.domain.models import MergeRequest
+    repo = Repository(provider="gitlab", project_path="g/upd-prov", gitlab_project_id=13)
+    db.add(repo)
+    await db.flush()
+    mr = MergeRequest(repo_id=repo.id, mr_iid=1, title="t", state="merged",
+                      source_branch="a", target_branch="develop", head_sha="s", web_url="u")
+    db.add(mr)
+    await db.flush()
+    l = Learning(repo_id=repo.id, topic="t", hint_text="h", kind="guidance", mr_id=mr.id)
+    db.add(l)
+    await db.flush()
+    updated = await L.upsert_learning(db, settings, repo_id=repo.id, topic="t2",
+                                      hint_text="h2", learning_id=l.id)
+    assert updated.hint_text == "h2"
+    assert updated.mr_id == mr.id

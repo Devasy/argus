@@ -23,7 +23,8 @@ logger = logging.getLogger("argus.audit_apply")
 ARCHIVABLE = frozenset({"stale", "contradicted", "unfalsifiable", "duplicate_of"})
 
 # Verdicts that make no claim about code and therefore need no citation.
-_CITATION_EXEMPT = frozenset({"ungrounded", "unfalsifiable"})
+# claims about two learnings, not about code: validated structurally in the relate stage
+_CITATION_EXEMPT = frozenset({"ungrounded", "unfalsifiable", "duplicate_of", "conflicts_with"})
 
 _DIRECTION = {
     "corroborated": +1.0,
@@ -129,7 +130,10 @@ async def apply_verdict(session: AsyncSession, verdict: AuditVerdict, *,
             changed = True
     elif verdict.proposed_action == "merge" and verdict.related_learning_id:
         survivor = await session.get(Learning, verdict.related_learning_id)
-        if survivor is not None and learning.id != survivor.id and survivor.repo_id == learning.repo_id:
+        # merging into an archived row archives both; merging across repos cross-contaminates them
+        if (survivor is not None and learning.id != survivor.id
+                and survivor.status == "active"
+                and survivor.repo_id == learning.repo_id):
             # Fold evidence into the survivor so the merge does not throw away
             # the duplicate's accumulated verdicts.
             survivor.hit_count += learning.hit_count

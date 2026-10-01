@@ -52,6 +52,18 @@ ALWAYS_AVAILABLE_TOOLS = frozenset({"outline_file", "search_code",
                                     "report_problem"}) | SISTER_TOOL_NAMES
 
 
+# Sub-agent delegation, not a capability grant: an agent allowlist predating it must not silently lose it.
+DELEGATION_TOOLS = frozenset({"generate_test_scenario"})
+
+
+def restrict_to_agent(tools: list, allowlist: list[str] | None) -> list:
+    """Narrow a specialist's tools to its own version's tool_allowlist (None = no restriction)."""
+    if allowlist is None:
+        return tools
+    keep = set(allowlist) | ALWAYS_AVAILABLE_TOOLS | DELEGATION_TOOLS
+    return [t for t in tools if t.name in keep]
+
+
 def chunk_token_budget(settings) -> int:
     """Diff tokens per analysis chunk: the explicit setting, else a fifth of the context window."""
     explicit = getattr(settings, "chunk_token_budget", 0) or 0
@@ -261,17 +273,21 @@ def build_agent_tool(deps: PipelineDeps, review_id: str, agent: ResolvedAgent,
 
     stage_name = f"{agent.name}:{chunk_id}"
 
-    @tool(f"invoke_{agent.name}_agent")
+    purpose = f" Specialty: {agent.description}." if agent.description else ""
+    description = (
+        f"Run the {agent.name} specialist reviewer over this chunk.{purpose} "
+        "Pass a description of the chunk (files, what changed, why it might "
+        "warrant this specialist's lens) as chunk_context. The specialist has "
+        "its own read tools and can look beyond this chunk's files if it needs "
+        "to; returns its findings as JSON.")
+
+    @tool(f"invoke_{agent.name}_agent", description=description)
     async def _invoke(chunk_context: str) -> str:
-        """Run the {agent.name} specialist reviewer over this chunk. Pass a
-        description of the chunk (files, what changed, why it might warrant
-        this specialist's lens) as chunk_context. The specialist has its own
-        read tools and can look beyond this chunk's files if it needs to;
-        returns its findings as JSON."""
+        """Invoke the specialist; the model-facing text is `description` above."""
         model, cbs = _model(deps, review_id, stage_name, agent.model)
         try:
             out: FindingList = await stages.run_stage_agent(
-                model, agent_tools,
+                model, restrict_to_agent(agent_tools, agent.tool_allowlist),
                 _prompt(deps, agent.guidelines, chunk_context),
                 "Investigate the chunk context above.", FindingList,
                 agent.max_rounds, callbacks=cbs,
@@ -288,6 +304,13 @@ def build_agent_tool(deps: PipelineDeps, review_id: str, agent: ResolvedAgent,
                 error=f"agent could not complete: {str(e)[:1500]}")
             return FindingList(findings=[]).model_dump_json()
         collected.extend(out.findings)
+        from argus.domain.models import ReviewReviewerAgentVersion
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        async with deps.sf() as s:
+            await s.execute(pg_insert(ReviewReviewerAgentVersion).values(
+                review_id=uuid.UUID(review_id), agent_version_id=agent.version_id)
+                .on_conflict_do_nothing(index_elements=["review_id", "agent_version_id"]))
+            await s.commit()
         await _record_stage(deps, review_id, stage_name,
                             {"findings": [f.model_dump() for f in out.findings]})
         return out.model_dump_json()
@@ -571,11 +594,14 @@ def build_graph(deps: PipelineDeps, checkpointer):
         sends += [Send("run_reviewer_agent", {"state": state, "agent_name": name})
                   for name in state.plan.assigned_agents
                   if name in deps.reviewer_agent_versions]
-        return sends
+        # nothing to analyze: go straight to gather so the review still publishes
+        return sends or "gather"
 
     def fan_out_qa(state: ReviewState):
-        return [Send("qa_chunk", {"state": state, "chunk": c.model_dump()})
-               for c in state.plan.chunks]
+        sends = [Send("qa_chunk", {"state": state, "chunk": c.model_dump()})
+                 for c in state.plan.chunks]
+        # nothing to analyze: go straight to gather_qa so the review still publishes
+        return sends or "gather_qa"
 
     def _specialist_hint(chunk: Chunk, plan: ReviewPlan) -> str:
         """Scout's risk-flag roster is a HINT here, not a binding assignment
@@ -737,8 +763,9 @@ def build_graph(deps: PipelineDeps, checkpointer):
         agent_tools = _filtered(list(deps.graphify_tools) + list(deps.skill_tools))
         try:
             out: FindingList = await stages.run_stage_agent(
-                model, _with_complaints(base_tools + agent_tools,
-                                        state.review_id, agent_name),
+                model, _with_complaints(
+                    restrict_to_agent(base_tools + agent_tools, agent.tool_allowlist),
+                    state.review_id, agent_name),
                 _prompt(deps, agent.guidelines, f"Stage: {agent_name} (whole MR)."),
                 "Whole-MR view:\n" + summary_table(state.plan.files),
                 FindingList, agent.max_rounds, callbacks=cbs,
@@ -1087,7 +1114,7 @@ def build_graph(deps: PipelineDeps, checkpointer):
         # file:line, so there is nothing for grounding/verify to check.
         g.add_node("qa_chunk", qa_chunk)
         g.add_node("gather_qa", gather_qa)
-        g.add_conditional_edges("scout", fan_out_qa, ["qa_chunk"])
+        g.add_conditional_edges("scout", fan_out_qa, ["qa_chunk", "gather_qa"])
         g.add_edge("qa_chunk", "gather_qa")
         g.add_edge("gather_qa", "publish")
     else:
@@ -1097,7 +1124,7 @@ def build_graph(deps: PipelineDeps, checkpointer):
         g.add_node("verify_chunk", verify_chunk)
         g.add_node("gather_verify", gather_verify)
         g.add_conditional_edges(
-            "scout", fan_out, ["analyze_chunk", "run_reviewer_agent"])
+            "scout", fan_out, ["analyze_chunk", "run_reviewer_agent", "gather"])
         g.add_edge("analyze_chunk", "gather")
         g.add_edge("run_reviewer_agent", "gather")
         g.add_conditional_edges(
@@ -1109,17 +1136,31 @@ def build_graph(deps: PipelineDeps, checkpointer):
     return g.compile(checkpointer=checkpointer)
 
 
+def checkpoint_thread_id(review_id, head_sha: str) -> str:
+    """Checkpoint key: a retry at a new head sha must start fresh, not resume stale plan/findings.
+
+    Checkpoints written before this key carried the sha are bare review_ids;
+    run_review_pipeline falls back to those once so in-flight jobs still resume."""
+    return f"{review_id}@{head_sha[:12]}" if head_sha else str(review_id)
+
+
 async def run_review_pipeline(review_id, deps: PipelineDeps, checkpointer) -> ReviewState:
     graph = build_graph(deps, checkpointer)
-    config = {"configurable": {"thread_id": str(review_id)}}
+    thread_id = checkpoint_thread_id(review_id, (deps.diff_refs or {}).get("head_sha") or "")
+    config = {"configurable": {"thread_id": thread_id}}
     fresh = ReviewState(review_id=str(review_id))
 
     input_state = fresh
     if checkpointer is not None:
         existing = await checkpointer.aget_tuple(config)
+        if existing is None and thread_id != str(review_id):
+            # Pre-sha checkpoints are keyed by the bare review_id: resume those once rather than restart a job straddling the deploy.
+            legacy = {"configurable": {"thread_id": str(review_id)}}
+            if await checkpointer.aget_tuple(legacy) is not None:
+                config, existing = legacy, True
         if existing is not None:
-            # A checkpoint already exists for this thread (e.g. a retried job
-            # for the same review_id) — resume from it instead of restarting.
+            # A checkpoint already exists for this thread (a retried job for
+            # the same review_id at the same head sha) — resume from it.
             input_state = None
 
     result = await graph.ainvoke(input_state, config=config)

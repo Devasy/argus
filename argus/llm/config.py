@@ -14,7 +14,8 @@ PROXY_MODEL = "openai/claude-sonnet-4-6"
 class LLMConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    provider: Literal["anthropic", "openai", "gemini", "ollama", "claude_cli_proxy"]
+    provider: Literal["anthropic", "openai", "gemini", "ollama",
+                     "claude_cli_proxy", "groq"]
     model: str
     api_base: str | None = None
     api_key: str | None = None
@@ -22,6 +23,9 @@ class LLMConfig(BaseModel):
     timeout: float | None = None
     supports_prompt_cache: bool = False
     langfuse_handler: object | None = Field(default=None, exclude=True)
+    # litellm-shaped {model, api_base, api_key} for a second endpoint to try
+    # if this one errors (rate limit, outage, ...) -- see llm/factory.py.
+    fallback: dict | None = None
     # Set by the caller (runner.py) from Settings.reasoning_budget_tokens
     # when provider == "ollama" -- see llm/factory.py for how this reaches
     # the actual request.
@@ -50,6 +54,23 @@ async def resolve_llm_config(session: AsyncSession,
     if ep is None:
         raise ValueError("no LLM endpoint configured and no proxy_url given")
     api_key = os.environ.get(ep.api_key_ref) if ep.api_key_ref else None
+    fallback = None
+    if ep.fallback_endpoint_id is not None:
+        fb = await session.get(LLMEndpoint, ep.fallback_endpoint_id)
+        if fb is not None:
+            fallback = {
+                "model": fb.model, "api_base": fb.base_url,
+                "api_key": os.environ.get(fb.api_key_ref) if fb.api_key_ref else None,
+            }
     return LLMConfig(provider=ep.provider, model=ep.model, api_base=ep.base_url,
-                     api_key=api_key,
+                     api_key=api_key, fallback=fallback,
                      supports_prompt_cache=(ep.provider == "anthropic"))
+
+
+async def resolve_llm_config_by_name(session: AsyncSession, name: str) -> LLMConfig | None:
+    """Config for the llm_endpoints row with this name, or None when no such row exists."""
+    ep_id = (await session.execute(select(LLMEndpoint.id).where(
+        LLMEndpoint.name == name))).scalar_one_or_none()
+    if ep_id is None:
+        return None
+    return await resolve_llm_config(session, ep_id, None)

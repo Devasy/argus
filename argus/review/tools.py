@@ -412,6 +412,26 @@ def build_learnings_search_tool(sf: async_sessionmaker, settings: Settings, repo
     return search_learnings_tool
 
 
+async def _resolve_learning_id(sf: async_sessionmaker, learning_id: str):
+    """A full UUID, or the 8-char short id search_learnings_tool shows; None unless exactly one learning matches."""
+    import re
+    import uuid as _uuid
+
+    ref = (learning_id or "").strip().lower()
+    try:
+        full = _uuid.UUID(ref)
+    except ValueError:
+        full = None
+    async with sf() as s:
+        if full is not None:
+            return full if await s.get(Learning, full) is not None else None
+        if not re.fullmatch(r"[0-9a-f]{8}[0-9a-f-]*", ref):
+            return None
+        hits = (await s.execute(select(Learning.id).where(
+            cast(Learning.id, SAText).like(f"{ref}%")).limit(2))).scalars().all()
+    return hits[0] if len(hits) == 1 else None
+
+
 def build_learnings_upsert_tool(sf: async_sessionmaker, settings: Settings, repo_id,
                                 mr_id=None, note_lookup: dict | None = None):
     @tool
@@ -435,13 +455,8 @@ def build_learnings_upsert_tool(sf: async_sessionmaker, settings: Settings, repo
         if action == "update":
             if not learning_id:
                 return "action=\"update\" requires a learning_id from search_learnings_tool"
-            try:
-                parsed_id = _uuid.UUID(learning_id)
-            except ValueError:
-                return f"no learning with id {learning_id}"
-            async with sf() as s:
-                existing = await s.get(Learning, parsed_id)
-            if existing is None:
+            parsed_id = await _resolve_learning_id(sf, learning_id)
+            if parsed_id is None:
                 return f"no learning with id {learning_id}"
 
         async with sf() as s:
@@ -456,12 +471,15 @@ def build_learnings_upsert_tool(sf: async_sessionmaker, settings: Settings, repo
                     parsed_source_note_id = _uuid.UUID(source_note_id)
                 except ValueError:
                     parsed_source_note_id = None
-            result = await upsert_learning(
-                s, settings, repo_id=repo_id, topic=topic, hint_text=hint_text,
-                kind=kind, file_paths=file_paths, metadata=metadata,
-                learning_id=parsed_id, mr_id=mr_id,
-                source_note_id=parsed_source_note_id,
-                learned_from_actor_id=learned_from_actor_id)
+            try:
+                result = await upsert_learning(
+                    s, settings, repo_id=repo_id, topic=topic, hint_text=hint_text,
+                    kind=kind, file_paths=file_paths, metadata=metadata,
+                    learning_id=parsed_id, mr_id=mr_id,
+                    source_note_id=parsed_source_note_id,
+                    learned_from_actor_id=learned_from_actor_id)
+            except ValueError as e:
+                return str(e)
             await s.commit()
         if parsed_id is not None:
             return f"updated learning {str(result.id)[:8]}"
@@ -508,7 +526,8 @@ COMPLAINT_CATEGORIES = (
 )
 
 
-def build_report_problem_tool(sf: async_sessionmaker, review_id, stage_name: str):
+def build_report_problem_tool(sf: async_sessionmaker, review_id, stage_name: str, *,
+                              distillation_run_id=None, audit_run_id=None):
     """A channel for an agent to report that OUR tooling, prompt, or context is
     at fault -- as opposed to a finding, which is about the code under review.
 
@@ -543,7 +562,8 @@ def build_report_problem_tool(sf: async_sessionmaker, review_id, stage_name: str
                     "expected, and what you got instead")
         async with sf() as s:
             s.add(AgentComplaint(
-                review_id=review_id, stage_name=stage_name,
+                review_id=review_id, distillation_run_id=distillation_run_id,
+                audit_run_id=audit_run_id, stage_name=stage_name,
                 category=category, target=target.strip() or None,
                 detail=detail.strip()[:4000], blocked=blocked))
             await s.commit()

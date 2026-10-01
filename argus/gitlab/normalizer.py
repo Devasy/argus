@@ -1,4 +1,5 @@
 """Turn raw GitLab payloads into idempotent upserts of domain entities."""
+import re
 from datetime import datetime
 
 from sqlalchemy import select
@@ -25,6 +26,18 @@ def classify_system_note(body: str) -> str | None:
                 continue
             return event
     return None
+
+
+# People sign in as fname.lname (developer.one too); every other account is a token or another bot.
+# The migration that re-filed existing notes (b4f8d6f470df) uses this same pattern.
+HUMAN_USERNAME = re.compile(r"^[a-z]+(\.[a-z]+)+[0-9]*$")
+
+
+def classify_author(username: str, bot_usernames: set[str]) -> str:
+    """argus itself is "bot"; another review bot is "external_bot", kept out of human learning."""
+    if username in bot_usernames:
+        return "bot"
+    return "human" if HUMAN_USERNAME.match(username or "") else "external_bot"
 
 
 def _ts(value: str | None) -> datetime | None:
@@ -121,9 +134,9 @@ async def sync_merge_request(session: AsyncSession, repo: Repository,
         if existing is None:
             session.add(MRVersion(
                 mr_id=mr.id, provider_version_id=v["id"],
-                head_commit_sha=v["head_commit_sha"],
-                base_commit_sha=v["base_commit_sha"],
-                start_commit_sha=v["start_commit_sha"],
+                head_commit_sha=v.get("head_commit_sha"),
+                base_commit_sha=v.get("base_commit_sha"),
+                start_commit_sha=v.get("start_commit_sha"),
                 version_created_at=_ts(v.get("created_at"))))
 
     # discussions + notes
@@ -168,11 +181,13 @@ async def sync_merge_request(session: AsyncSession, repo: Repository,
                 note.system_event_type = classify_system_note(note.body)
             else:
                 username = (raw_note.get("author") or {}).get("username", "")
-                note.author_type = "bot" if username in bot_usernames else "human"
+                note.author_type = classify_author(username, bot_usernames)
                 note.kind = "inline" if raw_note.get("position") else "summary"
             if raw_note.get("author"):
                 a = await upsert_actor(session, raw_note["author"])
                 note.author_id = a.id
+                if note.author_type in ("bot", "external_bot"):
+                    a.is_bot = True
             await session.flush()
             prev_note_id = note.id
 

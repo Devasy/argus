@@ -1,9 +1,10 @@
 """Periodic scheduling of learning audits.
 
-Deliberately not round-robin: auditing costs an LLM call per cluster, so repos
-are selected by staleness. Phase 2 keeps this simple (interval-based); the
-suspicion-ranked ordering (high-injection/zero-hit first, post-refactor
-triggers) is a follow-up once we can see real audit precision.
+Continuous and per-learning: each tick enqueues an audit_repo job for every
+enabled repo that has due learnings, and the job system's own resume/retry/
+lane routing takes it from there. Phase 2's interval-based per-repo batching
+is gone -- audit_interval_days now governs when a LEARNING is re-checked, not
+when a REPO gets audited.
 """
 import asyncio
 import logging
@@ -12,24 +13,47 @@ from datetime import datetime, timedelta, timezone
 logger = logging.getLogger("argus.audit_scheduler")
 
 
-def select_repos_to_audit(repos, now: datetime, interval_days: int) -> list:
-    """Repos never audited, or last audited longer ago than the interval."""
-    cutoff = now - timedelta(days=interval_days)
-    out = []
-    for r in repos:
-        last = getattr(r, "last_audit_at", None)
-        if last is None or last < cutoff:
-            out.append(r)
-    return out
+async def reclaim_stale_audit_runs(session, stale_after_s: int = 0) -> int:
+    """Mark orphaned 'running'/'queued' AuditRun rows as failed.
+
+    Skips a run whose job is still alive (queued or running in the job
+    system) -- that run resumes from its LangGraph checkpoint when the job is
+    claimed again, and marking it failed here would fight the requeue.
+    AuditRun has no locked_by/attempts of its own; job.py's queue owns retry."""
+    from sqlalchemy import select as _select
+    from sqlalchemy import exists
+
+    from argus.domain.models import AuditRun, Job
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_after_s)
+    job_alive = exists().where(Job.id == AuditRun.job_id,
+                               Job.status.in_(("queued", "running")))
+    rows = (await session.execute(_select(AuditRun).where(
+        AuditRun.status.in_(("running", "queued")),
+        (AuditRun.started_at.is_(None)) | (AuditRun.started_at < cutoff),
+        ~job_alive
+    ))).scalars().all()
+    for run in rows:
+        run.status = "failed"
+        run.error = "orphaned: worker process restarted mid-run"
+        run.finished_at = datetime.now(timezone.utc)
+        logger.warning("audit run %s (repo %s) reclaimed as failed; orphaned "
+                       "by a restart", run.id, run.repo_id)
+    if rows:
+        await session.flush()
+    return len(rows)
 
 
-async def run_audit_forever(sf, settings, client_factory, llm_cfg,
-                            sleep_seconds: int = 3600) -> None:
-    """Background loop. No-op unless settings.audit_enabled is on."""
-    from sqlalchemy import func, select
+async def run_audit_forever(sf, settings, sleep_seconds: int = 3600) -> None:
+    """Background loop. No-op unless settings.audit_enabled is on.
 
-    from argus.domain.models import AuditRun, Repository
-    from argus.knowledge.auditor import run_audit_for_repo
+    Enqueues, never runs: an audit_repo job (Task 9's audit_job.py) does the
+    actual work on its own worker lane, pinned to GPU 2."""
+    from sqlalchemy import select
+
+    from argus.domain.models import Repository
+    from argus.knowledge.audit_job import enqueue_audit
+    from argus.knowledge.audit_pick import count_due
 
     while True:
         try:
@@ -40,43 +64,13 @@ async def run_audit_forever(sf, settings, client_factory, llm_cfg,
                 repos = list((await s.execute(
                     select(Repository).where(Repository.enabled == True)  # noqa: E712
                 )).scalars().all())
-                last_by_repo = dict((await s.execute(
-                    select(AuditRun.repo_id, func.max(AuditRun.finished_at))
-                    .group_by(AuditRun.repo_id))).all())
-            for r in repos:
-                r.last_audit_at = last_by_repo.get(r.id)
-            due = select_repos_to_audit(repos, datetime.now(timezone.utc),
-                                        settings.audit_interval_days)
-            for repo in due:
-                async with sf() as s:
-                    run = AuditRun(repo_id=repo.id, status="running",
-                                   started_at=datetime.now(timezone.utc))
-                    s.add(run)
-                    await s.commit()
-                    run_id = run.id
-                client = client_factory()
-                try:
-                    result = await run_audit_for_repo(
-                        sf, settings, client, repo, llm_cfg,
-                        max_clusters=settings.audit_max_clusters,
-                        audit_run_id=run_id)
-                    if isinstance(result, dict) and result.get('status') == 'failed':
-                        status, error = 'failed', result.get('error') or 'Audit run returned failure'
-                    else:
-                        status, error = 'done', None
-                except Exception as e:
-                    logger.exception("audit run failed for repo %s", repo.id)
-                    result, status, error = {}, "failed", str(e)[:2000]
-                finally:
-                    await client.aclose()
-                async with sf() as s:
-                    row = await s.get(AuditRun, run_id)
-                    row.status = status
-                    row.error = error
-                    row.clusters_examined = result.get("clusters", 0)
-                    row.verdicts_written = result.get("verdicts", 0)
-                    row.finished_at = datetime.now(timezone.utc)
-                    await s.commit()
+                now = datetime.now(timezone.utc)
+                for repo in repos:
+                    due = await count_due(s, repo.id, now=now,
+                                          reaudit_after_days=settings.audit_interval_days)
+                    if due:
+                        await enqueue_audit(s, repo.id, trigger="scheduled")
+                await s.commit()
         except Exception:
             logger.exception("audit scheduler iteration failed")
         await asyncio.sleep(sleep_seconds)
