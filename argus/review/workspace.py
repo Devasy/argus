@@ -1,6 +1,15 @@
 import asyncio
+import re
 import subprocess
+import time
 from pathlib import Path
+
+
+# stderr of a git call whose connection never happened; anything else is a real answer and is not retried
+_TRANSIENT = ("Could not resolve host", "Temporary failure in name resolution",
+              "No address associated with hostname", "Failed to connect",
+              "Connection timed out")
+_RETRY_DELAYS_S = (2, 5)
 
 
 def _run(args: list[str], cwd: Path | None = None) -> None:
@@ -8,13 +17,19 @@ def _run(args: list[str], cwd: Path | None = None) -> None:
 
     subprocess.CalledProcessError's default str() is just "returned non-zero
     exit status 128" -- every caller here only logs str(e), so git's own
-    reason (the useful part) was being silently discarded."""
-    try:
-        subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        detail = e.stderr.strip() or e.stdout.strip()
-        raise RuntimeError(
-            f"{' '.join(args)} failed (exit {e.returncode}): {detail}") from e
+    reason (the useful part) was being silently discarded. Network failures
+    (the container's DNS drops gitlab.example.internal intermittently) are retried."""
+    for delay in (*_RETRY_DELAYS_S, None):
+        try:
+            subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True)
+            return
+        except subprocess.CalledProcessError as e:
+            detail = e.stderr.strip() or e.stdout.strip()
+            if delay is not None and any(t in detail for t in _TRANSIENT):
+                time.sleep(delay)
+                continue
+            raise RuntimeError(
+                f"{' '.join(args)} failed (exit {e.returncode}): {detail}") from e
 
 
 # Process-wide, keyed by repo root: every job builds its own WorkspaceManager for the same repo.
@@ -27,6 +42,18 @@ def _repo_lock(root: Path) -> asyncio.Lock:
     return _repo_locks.setdefault(str(root.resolve()), asyncio.Lock())
 
 
+_FULL_SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def _commit_of(bare: Path, ref: str) -> str:
+    """A branch name is not a checkout: pin it to its commit so the worktree is named, and reused, by that."""
+    if _FULL_SHA.fullmatch(ref):
+        return ref
+    out = subprocess.run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=bare,
+                         capture_output=True, text=True)
+    return out.stdout.strip() if out.returncode == 0 else ref
+
+
 class WorkspaceManager:
     def __init__(self, root: Path, clone_url: str):
         self.root = Path(root)
@@ -34,6 +61,8 @@ class WorkspaceManager:
         self.bare = self.root / "bare.git"
         # Worktrees this instance acquired, so a release after a failed acquire can't drop another job's hold.
         self._held: set[str] = set()
+        # branch/tag refs acquired by this instance -> the commit their worktree was built at
+        self._resolved: dict[str, str] = {}
 
     async def acquire(self, sha: str, mr_iid: int | None = None) -> Path:
         def _sync() -> Path:
@@ -74,9 +103,11 @@ class WorkspaceManager:
                     # still present, just unreachable from any ref. All 7
                     # golden-set benchmark reviews failed on exactly this.
                     _run(["git", "fetch", "origin", sha], cwd=self.bare)
-            wt = self.root / f"wt-{sha[:12]}"
+            commit = _commit_of(self.bare, sha)
+            self._resolved[sha] = commit
+            wt = self.root / f"wt-{commit[:12]}"
             if not wt.exists():
-                _run(["git", "worktree", "add", "--detach", str(wt), sha],
+                _run(["git", "worktree", "add", "--detach", str(wt), commit],
                      cwd=self.bare)
             return wt
         # Concurrent git fetch/worktree ops on one bare repo fail on ref locks, so serialize per repo.
@@ -89,13 +120,15 @@ class WorkspaceManager:
         return wt
 
     async def release(self, sha: str) -> None:
+        commit = self._resolved.get(sha, sha)
+
         def _sync() -> None:
-            wt = self.root / f"wt-{sha[:12]}"
+            wt = self.root / f"wt-{commit[:12]}"
             if wt.exists():
                 _run(["git", "worktree", "remove", "--force", str(wt)],
                      cwd=self.bare)
         async with _repo_lock(self.root):
-            key = str((self.root / f"wt-{sha[:12]}").resolve())
+            key = str((self.root / f"wt-{commit[:12]}").resolve())
             if key in self._held:
                 self._held.discard(key)
                 _worktree_users[key] = _worktree_users.get(key, 1) - 1

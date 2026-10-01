@@ -21,6 +21,9 @@ from argus.llm.config import LLMConfig
 from argus.llm.health import resolve_served_model
 from argus.llm.langfuse_run import LangfuseRun
 from argus.review.diffsvc import backfill_collapsed_diffs, parse_diffs
+from argus.review.followup import follow_up_prior_comments
+from argus.review.sisters import (acquire_sisters, build_sister_tools, release_sisters,
+                                      sister_prompt_block)
 from argus.review.incremental import (changed_paths_since,
                                           last_reviewed_version,
                                           restrict_files)
@@ -75,6 +78,21 @@ def _learnings_query_text(mr_title: str, changed_paths: list[str],
     whole review before the pipeline ever started."""
     paths = " ".join(changed_paths)[:max_path_chars]
     return f"{mr_title} {paths} {_diff_signal(hunks)}".strip()
+
+
+async def fetch_consistent_mr(gitlab, project_id, mr_iid,
+                              attempts: int = 3) -> tuple[dict, list[dict]]:
+    """MR payload and diffs taken at the same head sha: re-reads the MR after
+    the diff and retries if a push landed in between, so the worktree checked
+    out at mr["sha"] matches the diff the agents are shown."""
+    mr = await gitlab.get_merge_request(project_id, mr_iid)
+    for _ in range(attempts):
+        diffs = await gitlab.list_diffs(project_id, mr_iid)
+        after = await gitlab.get_merge_request(project_id, mr_iid)
+        if after["sha"] == mr["sha"]:
+            return after, diffs
+        mr = after
+    raise RuntimeError(f"MR !{mr_iid} head kept moving during fetch; retry later")
 
 
 async def execute_review_job(sf: async_sessionmaker, settings: Settings,
@@ -170,15 +188,23 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
     wm = WorkspaceManager(Path(settings.workspace_root).expanduser() / str(repo.id),
                           _clone_url(settings, repo.project_path))
     error: str | None = None
+    skipped: str | None = None
     mr_payload: dict | None = None
+    sister_held: list = []
     from contextlib import ExitStack
     review_span_stack = ExitStack()
     # Same id already stored on the Review row above, so the DB column and
     # the actual trace can never disagree.
     review_span_stack.enter_context(langfuse_run.span("review"))
     try:
-        mr_payload = await gitlab.get_merge_request(repo.gitlab_project_id, mr.mr_iid)
-        diffs = await gitlab.list_diffs(repo.gitlab_project_id, mr.mr_iid)
+        mr_payload, diffs = await fetch_consistent_mr(
+            gitlab, repo.gitlab_project_id, mr.mr_iid)
+        # A backlog can hold a review for hours; one whose MR closed meanwhile could never be posted.
+        if review_publish and mr_payload.get("state", "opened") != "opened":
+            skipped = (f"MR !{mr.mr_iid} was {mr_payload['state']} before the review "
+                       "started; nothing was reviewed")
+            logger.info("review %s skipped: %s", review_id, skipped)
+            return
         files, hunks = parse_diffs(diffs)
         workspace = await wm.acquire(mr_payload["sha"], mr.mr_iid)
         # GitLab collapses diff bodies on large MRs, leaving those files with
@@ -234,7 +260,9 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
             # Incremental re-review: if this MR was reviewed before at an
             # older head sha, restrict the file set to what changed since.
             prior_version = await last_reviewed_version(s, mr.id)
-            if prior_version is not None and prior_version.head_commit_sha != mr_payload["sha"]:
+            is_rereview = (prior_version is not None
+                           and prior_version.head_commit_sha != mr_payload["sha"])
+            if is_rereview:
                 changed = await changed_paths_since(
                     gitlab, repo.gitlab_project_id, mr.mr_iid,
                     prior_version.head_commit_sha, mr_payload["sha"])
@@ -272,12 +300,32 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
 
             await s.commit()
 
+        if (is_rereview and review_publish and review_mode == "full"
+                and mr_payload.get("state") == "opened" and settings.followup_mode != "off"):
+            try:
+                stats = await follow_up_prior_comments(
+                    sf, gitlab, repo.gitlab_project_id, mr.mr_iid, mr.id, mr_payload["sha"],
+                    workspace, llm_cfg, settings.followup_mode)
+                logger.info("review %s follow-up: %s", review_id, stats)
+            except Exception:
+                logger.exception("review %s follow-up failed; continuing with the review", review_id)
+
         skills = discover_module_skills(workspace)
         skill_tools = build_skill_tools(workspace, skills) if skills else []
         graphify_tools = (build_graphify_tool(graph_path, {f.path for f in files},
                                               hunks=hunks,
                                               files_by_id={f.file_id: f for f in files})
                           if graph_path is not None else [])
+
+        sisters, sister_held, sister_record = await acquire_sisters(
+            sf, gitlab, repo.id, mr_payload.get("source_branch"),
+            Path(settings.workspace_root).expanduser(),
+            lambda path: _clone_url(settings, path), mr_payload.get("target_branch"))
+        if sister_record:
+            mr_context = mr_context + "\n\n" + sister_prompt_block(sisters, sister_record)
+            async with sf() as s:
+                (await s.get(Review, review_id)).sister_context = sister_record
+                await s.commit()
 
         deps = PipelineDeps(
             sf=sf, settings=settings, llm_cfg=llm_cfg,
@@ -298,9 +346,11 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
             gitlab=gitlab, project_id=repo.gitlab_project_id, mr_iid=mr.mr_iid,
             diff_refs=mr_payload.get("diff_refs") or {}, mr_db_id=mr.id,
             extra_tools=[build_learning_tool(sf),
-                        build_file_knowledge_tool(sf, settings, repo.id, workspace)],
+                        build_file_knowledge_tool(sf, settings, repo.id, workspace),
+                        *build_sister_tools(sisters)],
             graphify_tools=graphify_tools,
             skill_tools=skill_tools,
+            sister_repos=[s.name for s in sisters],
             langfuse_metadata=langfuse_run.metadata)
 
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -331,6 +381,7 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
             await wm.release((mr_payload or {}).get("sha", ""))
         except Exception:
             pass
+        await release_sisters(sister_held)
         await gitlab.aclose()
         findings: list = []
         async with sf() as s:
@@ -340,7 +391,9 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
                       func.coalesce(func.sum(LLMRound.completion_tokens), 0))
                 .where(LLMRound.review_id == review_id))).one()
             review.prompt_tokens, review.completion_tokens = totals
-            if not _should_preserve_canceled_status(review):
+            if skipped is not None:
+                review.status, review.error = "canceled", skipped
+            elif not _should_preserve_canceled_status(review):
                 review.status = "failed" if error else "done"
                 review.error = error
             review.finished_at = datetime.now(timezone.utc)

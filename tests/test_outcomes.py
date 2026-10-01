@@ -450,3 +450,21 @@ async def test_publishing_review_still_waits(db):
 
     ev = (await _outcomes(db, review)).scalars().one()
     assert ev.outcome == "pending"
+
+
+async def test_backfill_leaves_learnings_without_stale_events_alone(db):
+    from argus.backfill_outcomes import reset_stale_events
+    repo, mr, review = await _scaffold(db)
+    touched = await _learning(db, repo, topic="touched")
+    untouched = await _learning(db, repo, topic="untouched")
+    touched.miss_count, untouched.miss_count = 5, 7
+    untouched.inconclusive_count = 2
+    db.add(InjectionEvent(learning_id=touched.id, review_id=review.id, outcome="miss"))
+    await db.flush()
+
+    await reset_stale_events(db)
+
+    await db.refresh(touched)
+    await db.refresh(untouched)
+    assert touched.miss_count == 0
+    assert (untouched.miss_count, untouched.inconclusive_count) == (7, 2)

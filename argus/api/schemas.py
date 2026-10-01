@@ -87,6 +87,48 @@ class DistillationRunSummaryOut(BaseModel):
     started_at: datetime | None = None
 
 
+class ThreadNoteOut(BaseModel):
+    id: uuid.UUID
+    author_username: str | None = None
+    author_type: str
+    kind: str
+    body: str
+    created_at: datetime | None = None
+    depth: int
+    disposition: str | None = None
+
+
+class CodeEventOut(BaseModel):
+    at: datetime
+    kind: Literal["line_changed", "commit"]
+    text: str
+
+
+class ThreadOut(BaseModel):
+    discussion_id: uuid.UUID
+    resolved: bool
+    anchor: str
+    has_bot_comment: bool
+    notes: list[ThreadNoteOut]
+    events: list[CodeEventOut] = []
+    disposition: str | None = None
+    verdict: str | None = None
+    verdict_reason: str | None = None
+    gitlab_url: str | None = None
+
+
+class DistillThreadOut(BaseModel):
+    discussion_id: uuid.UUID
+    thread_type: str
+    status: str
+    reconciler_label: str | None = None
+    reply_verdict: str | None = None
+    verdict_reason: str | None = None
+    learning_ids: list[str] = []
+    decision_reason: str | None = None
+    thread: ThreadOut | None = None
+
+
 class DistillationRunOut(BaseModel):
     id: uuid.UUID
     mr_id: uuid.UUID
@@ -99,11 +141,13 @@ class DistillationRunOut(BaseModel):
     finished_at: datetime | None = None
     prompt_tokens: int
     completion_tokens: int
+    threads: list[DistillThreadOut] = []
 
 
 class MergeRequestDetail(BaseModel):
     mr: MergeRequestOut
     notes: list[NoteOut]
+    threads: list[ThreadOut] = []
     reviews: list[ReviewSummaryOut]
     distillation_runs: list[DistillationRunSummaryOut]
 
@@ -392,6 +436,31 @@ class AuditVerdictOut(BaseModel):
     learning_repo_path: str | None = None
 
 
+class AuditStageOut(BaseModel):
+    stage_name: str
+    status: str
+    artifact: dict | None = None
+    error: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
+class AuditRunDetailOut(BaseModel):
+    id: uuid.UUID
+    repo_id: uuid.UUID
+    repo_path: str | None = None
+    status: str
+    trigger: str
+    planned_count: int
+    grounded_count: int
+    verdicts_written: int
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error: str | None = None
+    langfuse_trace_id: str | None = None
+    stages: list[AuditStageOut] = []
+
+
 class PaginatedAuditVerdicts(BaseModel):
     items: list[AuditVerdictOut]
     total: int
@@ -403,6 +472,7 @@ class MeOut(BaseModel):
     role: Literal["user", "admin"]
     # Human-readable only, not a real identity yet -- see api/auth.py.
     label: str
+    permissions: list[str] = []
 
 
 class QueueKindCountOut(BaseModel):

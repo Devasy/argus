@@ -66,3 +66,51 @@ def test_full_diff_text_skips_files_with_no_hunks():
     files = [FileChange(file_id="f1", path="deleted.py", change_kind="deleted",
                         hunk_ids=[])]
     assert full_diff_text(files, {}) == ""
+
+
+import subprocess
+
+from argus.review.diffsvc import backfill_collapsed_diffs
+
+
+def _git(repo, *args):
+    return subprocess.run(["git", *args], cwd=repo, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _repo_with_rename(tmp_path, new_body):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    body = "".join(f"line {i}\n" for i in range(40))
+    (repo / "old.py").write_text(body)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "mv", "old.py", "new.py")
+    (repo / "new.py").write_text(new_body(body))
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "rename")
+    return repo, base, _git(repo, "rev-parse", "HEAD")
+
+
+async def test_backfill_diffs_a_renamed_file_against_its_old_path(tmp_path):
+    repo, base, head = _repo_with_rename(
+        tmp_path, lambda b: b.replace("line 20\n", "line twenty\n"))
+    fc = FileChange(file_id="f1", path="new.py", old_path="old.py",
+                    change_kind="renamed", diff_available=False)
+    hunks: dict = {}
+    assert await backfill_collapsed_diffs([fc], hunks, repo, base, head) == 1
+    h = hunks[fc.hunk_ids[0]]
+    assert h.old_start > 0, "rename must diff against old.py, not as a new file"
+    assert "+line twenty" in h.diff_text
+
+
+async def test_backfill_pure_rename_with_no_hunks_is_left_unavailable(tmp_path):
+    repo, base, head = _repo_with_rename(tmp_path, lambda b: b)
+    fc = FileChange(file_id="f1", path="new.py", old_path="old.py",
+                    change_kind="renamed", diff_available=False)
+    assert await backfill_collapsed_diffs([fc], {}, repo, base, head) == 0
+    assert fc.diff_available is False

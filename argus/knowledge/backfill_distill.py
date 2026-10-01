@@ -1,24 +1,26 @@
-"""One-off CLI backfill: distill learnings from human comments on merged
-MRs, using the agentic per-MR runner (argus.knowledge.agentic_distiller).
+"""One-off CLI backfill: enqueue distillation for settled threads on merged MRs.
+
+Goes through the same path as the poller (enqueue_ready_threads -> distill_mr
+jobs), so workers, the distill_threads ledger and validation are identical to
+live. --bot-threads-only is the one-time catch-up for bot threads with human
+replies that the old pipeline never showed the model.
 
 Usage:
     uv run python -m argus.knowledge.backfill_distill [--repo-id ID]
-        [--llm-endpoint-id ID] [--dry-run]
+        [--bot-threads-only] [--dry-run]
 """
 import argparse
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from argus.config import get_settings
 from argus.db import get_engine, session_factory
-from argus.domain.models import MergeRequest, Note, Repository
-from argus.gitlab.client import GitLabClient
-from argus.knowledge.agentic_distiller import run_agentic_distillation_for_mr
-from argus.llm.config import resolve_llm_config
+from argus.domain.models import MergeRequest, Note
 
 logger = logging.getLogger("argus.backfill_distill")
 
@@ -37,51 +39,43 @@ async def find_qualifying_mrs(session: AsyncSession, *,
     return list(rows)
 
 
-async def _run(args: argparse.Namespace) -> None:
-    settings = get_settings()
-    engine = get_engine(settings.database_url)
-    sf = session_factory(engine)
+async def enqueue_backfill(session: AsyncSession, mrs, *, bot_threads_only: bool,
+                           now) -> int:
+    """Number of distill_mr jobs enqueued; the caller commits."""
+    from argus.knowledge.distill_threads import enqueue_ready_threads
+    total = 0
+    for mr in mrs:
+        total += len(await enqueue_ready_threads(session, mr, now,
+                                                 only_bot_threads=bot_threads_only))
+    return total
 
+
+async def _run(args: argparse.Namespace) -> None:
+    from argus.knowledge.distill_threads import select_threads_to_distill
+
+    settings = get_settings()
+    sf = session_factory(get_engine(settings.database_url))
     repo_id = uuid.UUID(args.repo_id) if args.repo_id else None
-    endpoint_id = uuid.UUID(args.llm_endpoint_id) if args.llm_endpoint_id else None
+    now = datetime.now(timezone.utc)
 
     async with sf() as s:
-        llm_cfg = await resolve_llm_config(s, endpoint_id, proxy_url=None)
         mrs = await find_qualifying_mrs(s, repo_id=repo_id)
-
-    logger.info("found %d qualifying merged MR(s)%s", len(mrs),
-               f" in repo {repo_id}" if repo_id else "")
-
-    verify = settings.gitlab_ca_bundle or settings.gitlab_ssl_verify
-    gitlab = GitLabClient(settings.gitlab_url, settings.gitlab_token, verify)
-    try:
-        for mr in mrs:
-            async with sf() as s:
-                repo = await s.get(Repository, mr.repo_id)
-                notes = (await s.execute(select(Note).where(
-                    Note.mr_id == mr.id, Note.author_type == "human",
-                    Note.kind.in_(["inline", "summary"])
-                ).order_by(Note.note_created_at))).scalars().all()
-            if args.dry_run:
-                logger.info("[dry-run] mr=%s !%d notes=%d — would distill",
-                           mr.id, mr.mr_iid, len(notes))
-                continue
-            try:
-                result = await run_agentic_distillation_for_mr(
-                    sf, settings, gitlab, repo, mr, list(notes), llm_cfg)
-            except Exception as e:
-                logger.exception("mr %s !%d failed: %s", mr.id, mr.mr_iid, e)
-                continue
-            counts = {"create": 0, "update": 0, "skip": 0}
-            for entry in result.entries:
-                counts[entry.action] += 1
-                logger.info("mr=%s !%d [%s] %s", mr.id, mr.mr_iid, entry.action,
-                           entry.reason)
-            logger.info("mr=%s !%d done: %d created, %d updated, %d skipped",
-                       mr.id, mr.mr_iid, counts["create"], counts["update"],
-                       counts["skip"])
-    finally:
-        await gitlab.aclose()
+        logger.info("found %d qualifying merged MR(s)%s", len(mrs),
+                    f" in repo {repo_id}" if repo_id else "")
+        if args.dry_run:
+            total = 0
+            for mr in mrs:
+                threads = await select_threads_to_distill(s, mr, now)
+                if args.bot_threads_only:
+                    threads = [t for t in threads if t.thread_type == "bot_thread"]
+                if threads:
+                    total += len(threads)
+                    logger.info("[dry-run] mr=%s !%d threads=%d", mr.id, mr.mr_iid, len(threads))
+            logger.info("[dry-run] %d thread(s) would be queued", total)
+            return
+        jobs = await enqueue_backfill(s, mrs, bot_threads_only=args.bot_threads_only, now=now)
+        await s.commit()
+    logger.info("enqueued %d distill_mr job(s)", jobs)
 
 
 def main() -> None:
@@ -89,10 +83,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-id", default=None,
                         help="restrict to one repository (uuid)")
-    parser.add_argument("--llm-endpoint-id", default=None,
-                        help="LLM endpoint to use (uuid); default endpoint if omitted")
+    parser.add_argument("--bot-threads-only", action="store_true",
+                        help="only threads where a human replied to a argus comment")
     parser.add_argument("--dry-run", action="store_true",
-                        help="log which MRs/notes would be processed, without running the agent")
+                        help="log how many threads would be queued, without enqueuing")
     args = parser.parse_args()
     asyncio.run(_run(args))
 

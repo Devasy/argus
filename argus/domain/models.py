@@ -134,7 +134,7 @@ class Note(Base):
     __tablename__ = "notes"
     __table_args__ = (
         UniqueConstraint("mr_id", "provider_note_id"),
-        CheckConstraint("author_type IN ('bot','human','system')",
+        CheckConstraint("author_type IN ('bot','human','system','external_bot')",
                         name="note_author_type_check"),
         CheckConstraint("kind IN ('inline','summary','system')",
                         name="note_kind_check"),
@@ -509,7 +509,7 @@ class LLMRound(Base):
 class AuditRun(Base):
     __tablename__ = "audit_runs"
     __table_args__ = (
-        CheckConstraint("status IN ('running','done','failed')",
+        CheckConstraint("status IN ('queued','running','done','failed')",
                         name="audit_run_status_check"),
     )
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -532,6 +532,28 @@ class AuditRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
     created_at: Mapped[datetime] = _now()
+    trigger: Mapped[str] = mapped_column(Text, default="scheduled", server_default="scheduled")
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    planned_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    grounded_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class AuditStage(Base):
+    """One node of an audit run's pipeline, for the graph and progress bar (mirrors ReviewStage)."""
+    __tablename__ = "audit_stages"
+    __table_args__ = (
+        UniqueConstraint("audit_run_id", "stage_name"),
+        CheckConstraint("status IN ('running','done','failed')", name="audit_stage_status_check"),
+    )
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    audit_run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("audit_runs.id", ondelete="CASCADE"))
+    stage_name: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, default="running")
+    artifact: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = _now()
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
 
 
 class AuditVerdict(Base):
@@ -617,6 +639,46 @@ class DistillationRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
     created_at: Mapped[datetime] = _now()
+
+
+class DistillThread(Base):
+    """Distillation state of one MR discussion: which human notes it was last
+    distilled at (content_hash) and what was decided.
+
+    Without this, a comment the agent skipped left no trace and was re-sent on
+    every poll -- 7,080 runs covered only 945 distinct batches."""
+
+    __tablename__ = "distill_threads"
+    __table_args__ = (
+        UniqueConstraint("discussion_id"),
+        CheckConstraint("thread_type IN ('bot_thread','human_thread')",
+                        name="distill_thread_type_check"),
+        CheckConstraint("status IN ('queued','done','failed')",
+                        name="distill_thread_status_check"),
+        CheckConstraint("reply_verdict IS NULL OR reply_verdict IN "
+                        "('accepted','rejected','acknowledged','question','unclear')",
+                        name="distill_thread_verdict_check"),
+        Index("ix_distill_threads_mr", "mr_id"),
+    )
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    mr_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("merge_requests.id", ondelete="CASCADE"))
+    discussion_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("discussions.id", ondelete="CASCADE"))
+    thread_type: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    distillation_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("distillation_runs.id", ondelete="SET NULL"))
+    reply_verdict: Mapped[str | None] = mapped_column(Text)
+    verdict_reason: Mapped[str | None] = mapped_column(Text)
+    learning_ids: Mapped[list | None] = mapped_column(JSONB)
+    decision_reason: Mapped[str | None] = mapped_column(Text)
+    seeded: Mapped[bool] = mapped_column(Boolean, default=False,
+                                         server_default=text("false"))
+    created_at: Mapped[datetime] = _now()
+    updated_at: Mapped[datetime] = _now()
 
 
 class InjectionEvent(Base):

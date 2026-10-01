@@ -36,6 +36,21 @@ def diff_line_ranges(files_by_id: dict, hunks: dict) -> dict[str, list[tuple[int
     return ranges
 
 
+def drop_foreign_files(findings: list[CandidateFinding], tool_ctx) -> list[CandidateFinding]:
+    """Drop findings on files neither changed by the MR nor present in its repo (e.g. a sister repo's)."""
+    if getattr(tool_ctx, "workspace", None) is None:
+        return findings
+    mr_paths = {fc.path for fc in tool_ctx.files_by_id.values()}
+    kept = []
+    for f in findings:
+        if f.file_path in mr_paths or (tool_ctx.workspace / f.file_path).is_file():
+            kept.append(f)
+        else:
+            logger.warning("dropping finding %r on %s: not a file of this MR's repository",
+                           f.title, f.file_path)
+    return kept
+
+
 def is_outside_diff(f: CandidateFinding,
                     ranges: dict[str, list[tuple[int, int]]]) -> bool:
     """True when this finding's line is not covered by any hunk.
@@ -72,21 +87,24 @@ def rank_findings(findings: list[CandidateFinding],
     `findings`/`state.findings` are left untouched. When a verdict carries a
     `corrected` finding (verify's inline fix-up for a real but malformed
     finding, including one it relocated after a grounding flag), that replaces
-    the original entirely before line_corrections is applied on top.
+    the original entirely; line_corrections is applied on top unless verify
+    moved the finding to a different line.
     """
     line_corrections = line_corrections or {}
     verdict_by_id = {v.finding_id: v for v in verdicts}
     valid_ids = {v.finding_id for v in verdicts if v.valid}
     kept = [f for f in findings if f.finding_id in valid_ids]
-    fixed_up = [
-        verdict_by_id[f.finding_id].corrected
-        if verdict_by_id[f.finding_id].corrected is not None else f
-        for f in kept]
-    corrected = [
-        f.model_copy(update={"line": line_corrections[f.finding_id]})
-        if f.finding_id in line_corrections else f
-        for f in fixed_up]
-    return sorted(corrected, key=lambda f: SEVERITY_WEIGHT[f.severity] * f.confidence,
+    out = []
+    for f in kept:
+        fixed = verdict_by_id[f.finding_id].corrected
+        grounded = line_corrections.get(f.finding_id)
+        # verify moved it deliberately: its line is authoritative over grounding's guess
+        relocated = fixed is not None and fixed.line not in (f.line, grounded)
+        chosen = fixed if fixed is not None else f
+        if grounded is not None and not relocated:
+            chosen = chosen.model_copy(update={"line": grounded})
+        out.append(chosen)
+    return sorted(out, key=lambda f: SEVERITY_WEIGHT[f.severity] * f.confidence,
                   reverse=True)
 
 
@@ -265,26 +283,50 @@ async def publish_qa_review(state: ReviewState, deps, *,
     return CompiledReview(published_finding_ids=[], summary_markdown=summary)
 
 
-async def _mr_still_open(deps) -> bool:
-    """Whether the MR is open now, not when the review started. Fails OPEN so
-    a transient GitLab error cannot silently discard a review's output."""
+def summary_marker(review_id: str) -> str:
+    return f"<!-- argus-review:{review_id} -->"
+
+
+async def _summary_already_posted(deps, review_id: str) -> bool:
+    """Fail-open: if notes can't be read, post anyway -- a duplicate beats a missing summary."""
+    try:
+        notes = await deps.gitlab.list_notes(deps.project_id, deps.mr_iid)
+    except Exception:
+        logger.warning("could not list notes for MR !%s; posting summary", deps.mr_iid)
+        return False
+    marker = summary_marker(review_id)
+    return any(marker in (n.get("body") or "") for n in notes)
+
+
+async def _mr_closed_state(deps) -> str | None:
+    """The MR's state now if it is no longer open, else None. Fails OPEN so a
+    transient GitLab error cannot silently discard a review's output."""
     try:
         payload = await deps.gitlab.get_merge_request(deps.project_id, deps.mr_iid)
     except Exception as e:
         logger.warning("could not confirm MR !%s state (%s); publishing anyway",
                        deps.mr_iid, e)
-        return True
+        return None
     state = (payload or {}).get("state")
     if state != "opened":
         logger.info("MR !%s is %s; recording findings without commenting",
                     deps.mr_iid, state)
-        return False
-    return True
+        return state or "unknown"
+    return None
+
+
+def _posted_line(should_publish: bool, posted: int, recorded: int, closed: str | None) -> str:
+    if should_publish:
+        return f"{posted} inline comment(s) posted."
+    if closed is not None:
+        return f"MR was {closed} before publishing: {recorded} finding(s) recorded, none posted."
+    return f"Dry run: {recorded} finding(s) recorded, none posted."
 
 
 async def publish_review(state: ReviewState, deps) -> CompiledReview:
     # Short-circuits, so a dry run never pays for the MR-state call.
-    should_publish = deps.publish and await _mr_still_open(deps)
+    closed = await _mr_closed_state(deps) if deps.publish else None
+    should_publish = deps.publish and closed is None
     if deps.review_mode == "qa_scenarios":
         return await publish_qa_review(state, deps, publish=should_publish)
     verdict_by_id = {v.finding_id: v for v in state.verdicts}
@@ -293,6 +335,8 @@ async def publish_review(state: ReviewState, deps) -> CompiledReview:
     ranked = drop_already_published(
         ranked, await published_titles_for_mr(
             deps.sf, deps.mr_db_id, uuid.UUID(state.review_id)))
+    if getattr(deps, "sister_repos", None):
+        ranked = drop_foreign_files(ranked, deps.tool_ctx)
     posted_before = await already_published_in_review(
         deps.sf, uuid.UUID(state.review_id))
     # Route findings about untouched code away from the inline path before the
@@ -305,6 +349,7 @@ async def publish_review(state: ReviewState, deps) -> CompiledReview:
     budget = deps.settings.max_inline_comments
     inline, overflow = anchorable[:budget], anchorable[budget:]
     published: list[str] = []
+    posted = 0  # comments actually on GitLab; `published` also holds findings only recorded
 
     for f in inline:
         if any(_is_same_finding(f.file_path, f.title, f.evidence_quote, p, t, q)
@@ -312,6 +357,7 @@ async def publish_review(state: ReviewState, deps) -> CompiledReview:
             logger.info("skipping %s: this review already posted it",
                         f.finding_id)
             published.append(f.finding_id)
+            posted += 1
             continue
         note_payload = None
         if should_publish:
@@ -359,10 +405,11 @@ async def publish_review(state: ReviewState, deps) -> CompiledReview:
                           published_note_id=note_id))
             await s.commit()
         published.append(f.finding_id)
+        posted += note_payload is not None
 
     summary_lines = [f"## argus review", "",
                      f"**{state.plan.intent}** — {state.plan.mr_summary}", "",
-                     f"{len(published)} inline comment(s) posted."]
+                     _posted_line(should_publish, posted, len(published), closed)]
     if outside:
         # Rendered in full rather than collapsed: a broken caller outside the
         # diff is often the most important thing in the review, and it is the
@@ -385,9 +432,12 @@ async def publish_review(state: ReviewState, deps) -> CompiledReview:
                           for f in overflow]
         summary_lines += ["", "</details>"]
     summary = "\n".join(summary_lines)
-    if should_publish:
+    if should_publish and not await _summary_already_posted(deps, state.review_id):
         try:
-            await deps.gitlab.create_discussion(deps.project_id, deps.mr_iid, summary)
+            # marker only on GitLab: it is how a resumed publish recognises its own summary
+            await deps.gitlab.create_discussion(
+                deps.project_id, deps.mr_iid,
+                summary + "\n\n" + summary_marker(state.review_id))
         except Exception:
             logger.exception("summary post failed")
 
@@ -396,12 +446,21 @@ async def publish_review(state: ReviewState, deps) -> CompiledReview:
     # like any other, and distinguishable via outside_diff from one that
     # merely lost the inline budget.
     async with deps.sf() as s:
+        existing = set((await s.execute(
+            select(Finding.file_path, Finding.line, Finding.title)
+            .where(Finding.review_id == uuid.UUID(state.review_id),
+                   Finding.published_note_id.is_(None)))).all())
         for f in overflow + outside:
+            # a resumed publish must not re-insert rows the first attempt already wrote
+            if (f.file_path, f.line, f.title) in existing:
+                continue
             verdict = verdict_by_id.get(f.finding_id)
             s.add(Finding(review_id=uuid.UUID(state.review_id), stage=f.stage,
                           type=f.type, severity=f.severity, confidence=f.confidence,
                           file_path=f.file_path, line=f.line, title=f.title,
                           body=f.body, evidence_quote=f.evidence_quote,
+                          suggestion_old=f.suggestion_old,
+                          suggestion_new=f.suggestion_new,
                           contributing_learning_ids=f.contributing_learning_ids or None,
                           verdict_valid=True,
                           outside_diff=f.outside_diff,

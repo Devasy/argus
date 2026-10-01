@@ -2,15 +2,15 @@
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from argus.domain.models import (Actor, AuditRun, Discussion,
                                      DistillationRun, Feedback, Job, Learning,
                                      MergeRequest, Note, Repository, Review,
-                                     ReviewerAgent, ReviewerAgentVersion,
-                                     ReviewReviewerAgentVersion)
+                                     ReviewerAgent, ReviewerAgentVersion)
+from argus.knowledge.acceptance import agent_notes_query
 
 ACCEPTED = ("accepted", "accepted_manually", "accepted_by_followup")
 REJECTED = ("rejected_with_rationale",)
@@ -69,7 +69,7 @@ async def compute_dashboard_stats(session: AsyncSession, days: int) -> dict:
         .where(Review.created_at >= cutoff, Review.publish.is_(True))
         .group_by("d").order_by("d"))).all()
 
-    # ---- per-agent breakdown (direct note→review attribution) -----------
+    # ---- per-agent breakdown (notes each agent wrote, via Finding.stage) --
     agent_rows = (await session.execute(
         select(ReviewerAgent.id, ReviewerAgent.name,
                func.max(ReviewerAgentVersion.version))
@@ -80,23 +80,9 @@ async def compute_dashboard_stats(session: AsyncSession, days: int) -> dict:
     for agent_id, name, cur_ver in agent_rows:
         version_ids = select(ReviewerAgentVersion.id).where(
             ReviewerAgentVersion.agent_id == agent_id)
-        review_ids = select(ReviewReviewerAgentVersion.review_id).where(
-            ReviewReviewerAgentVersion.agent_version_id.in_(version_ids))
 
         async def _n(dispositions=None):
-            # Notes carrying review_id count only toward that review's
-            # agents (direct attribution); legacy notes (review_id IS NULL,
-            # predating that column) fall back to the MR-wide join used by
-            # argus.knowledge.acceptance, so historical data isn't
-            # silently invisible in the per-agent breakdown.
-            q = (select(func.count(func.distinct(Note.id)))
-                 .join(MergeRequest, MergeRequest.id == Note.mr_id)
-                 .join(Review, Review.mr_id == MergeRequest.id)
-                 .where(Note.author_type == "bot", Note.kind == "inline",
-                        Note.note_created_at >= cutoff,
-                        Review.id.in_(review_ids),
-                        or_(Note.review_id.is_(None),
-                            Note.review_id == Review.id)))
+            q = agent_notes_query(name, version_ids).where(Note.note_created_at >= cutoff)
             if dispositions:
                 q = q.where(Note.disposition.in_(dispositions))
             return (await session.execute(q)).scalar_one()

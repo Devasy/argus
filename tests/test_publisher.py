@@ -89,6 +89,24 @@ def test_rank_applies_line_corrections_on_top_of_verdict_corrected():
     assert ranked[0].line == 5
 
 
+def test_rank_keeps_verifys_relocated_line_over_grounding():
+    """verify saw the grounding-corrected line (5) and chose a different one
+    (42) with real file access; grounding must not snap it back to 5."""
+    original = _f("a", line=10)
+    moved = original.model_copy(update={"line": 42})
+    verdicts = [Verdict(finding_id="a", valid=True, reason="moved", corrected=moved)]
+    ranked = rank_findings([original], verdicts, line_corrections={"a": 5})
+    assert ranked[0].line == 42
+
+
+def test_rank_applies_grounding_when_verify_kept_the_grounded_line():
+    original = _f("a", line=10)
+    same = original.model_copy(update={"line": 5, "body": "fixed"})
+    verdicts = [Verdict(finding_id="a", valid=True, reason="ok", corrected=same)]
+    ranked = rank_findings([original], verdicts, line_corrections={"a": 5})
+    assert ranked[0].line == 5 and ranked[0].body == "fixed"
+
+
 def test_build_position_uses_corrected_line_from_rank_findings():
     """End-to-end check that the corrected line (not the original) is what
     ends up in the GitLab comment position, flowing through rank_findings
@@ -146,7 +164,7 @@ class FakeGitLabClient:
 
     async def get_merge_request(self, project_id, mr_iid):
         """Open by default, so publish-path tests exercise the real branch
-        rather than _mr_still_open's fail-open error handling."""
+        rather than _mr_closed_state's fail-open error handling."""
         return {"iid": mr_iid, "state": "opened"}
 
     async def create_discussion(self, project_id, mr_iid, body, position=None):
@@ -159,6 +177,9 @@ class FakeGitLabClient:
         note_id = self._next_note_id
         self._next_note_id += 1
         return {"notes": [{"id": note_id, "body": body}]}
+
+    async def list_notes(self, project_id, mr_iid):
+        return [{"body": c["body"]} for c in self.calls]
 
 
 def _finding(fid, sev="high", conf=0.9, line=10, path="a.py"):
@@ -719,6 +740,9 @@ async def test_no_comments_posted_when_the_mr_merged_mid_review(
 
     assert gitlab.calls == [], "nobody will ever read a comment on a merged MR"
     assert compiled.published_finding_ids == ["f1"]
+    # review a1232d83 claimed "5 inline comment(s) posted." with nothing on GitLab
+    assert "comment(s) posted" not in compiled.summary_markdown
+    assert "MR was merged before publishing: 1 finding(s) recorded, none posted." in compiled.summary_markdown
     async with sf() as s:
         rows = (await s.execute(select(Finding).where(
             Finding.review_id == review_id))).scalars().all()
@@ -786,10 +810,35 @@ async def test_dry_run_does_not_bother_checking_mr_state(
     gitlab = FakeGitLabWithState(state="opened")
     deps = await _make_deps(sf, settings, gitlab, mr_db_id, tmp_path)
 
-    await publish_review(state, deps.model_copy(update={"publish": False}))
+    compiled = await publish_review(state, deps.model_copy(update={"publish": False}))
 
     assert gitlab.state_queries == 0
     assert gitlab.calls == []
+    assert "Dry run: 1 finding(s) recorded, none posted." in compiled.summary_markdown
+
+
+async def test_summary_counts_only_comments_that_reached_gitlab(
+        db, engine, settings, tmp_path):
+    from argus.db import session_factory
+
+    class FailsF1(FakeGitLabClient):
+        async def create_discussion(self, project_id, mr_iid, body, position=None):
+            if "title-f1" in body:
+                raise RuntimeError("GitLab 500")
+            return await super().create_discussion(project_id, mr_iid, body, position)
+
+    sf = session_factory(engine)
+    review_id, mr_db_id = await _make_review_and_mr(sf)
+    state = ReviewState(
+        review_id=str(review_id),
+        plan=ReviewPlan(intent="i", mr_summary="s", files=[]),
+        findings=[_finding("f1", line=10, path="a.py"), _finding("f2", line=20, path="b.py")],
+        verdicts=[Verdict(finding_id=f, valid=True, reason="ok") for f in ("f1", "f2")])
+    deps = await _make_deps(sf, settings, FailsF1(), mr_db_id, tmp_path)
+
+    compiled = await publish_review(state, deps)
+
+    assert "1 inline comment(s) posted." in compiled.summary_markdown
 
 
 def test_dedupe_catches_the_same_finding_on_a_nearby_line():
@@ -1013,3 +1062,51 @@ async def test_note_and_finding_are_written_in_one_commit(
             "the Note must not survive when its Finding's write in the same "
             "commit fails, or a resume would think this was already posted")
         assert len(findings) == 0
+
+
+async def test_overflow_findings_keep_suggestions_and_are_not_duplicated_on_rerun(
+        db, engine, settings, tmp_path):
+    from argus.db import session_factory
+    from argus.domain.models import Finding
+    from sqlalchemy import select
+
+    sf = session_factory(engine)
+    review_id, mr_db_id = await _make_review_and_mr(sf)
+    f1 = _finding("f1", sev="critical", line=10, path="a.py")
+    f2 = _finding("f2", sev="low", line=20, path="b.py").model_copy(
+        update={"suggestion_old": "x = 1", "suggestion_new": "x = 2"})
+    state = ReviewState(
+        review_id=str(review_id),
+        plan=ReviewPlan(intent="i", mr_summary="s", files=[]),
+        findings=[f1, f2],
+        verdicts=[Verdict(finding_id=f.finding_id, valid=True, reason="ok")
+                  for f in (f1, f2)])
+    deps = await _make_deps(sf, settings, FakeGitLabClient(), mr_db_id, tmp_path,
+                            max_inline_comments=1)
+
+    await publish_review(state, deps)
+    await publish_review(state, deps)
+
+    async with sf() as s:
+        rows = (await s.execute(select(Finding).where(
+            Finding.review_id == review_id, Finding.line == 20))).scalars().all()
+    assert len(rows) == 1
+    assert (rows[0].suggestion_old, rows[0].suggestion_new) == ("x = 1", "x = 2")
+
+
+async def test_rerun_publish_does_not_post_a_second_summary(db, engine, settings, tmp_path):
+    from argus.db import session_factory
+
+    sf = session_factory(engine)
+    review_id, mr_db_id = await _make_review_and_mr(sf)
+    state = ReviewState(review_id=str(review_id),
+                        plan=ReviewPlan(intent="i", mr_summary="s", files=[]),
+                        findings=[], verdicts=[])
+    gitlab = FakeGitLabClient()
+    deps = await _make_deps(sf, settings, gitlab, mr_db_id, tmp_path)
+
+    await publish_review(state, deps)
+    await publish_review(state, deps)
+
+    summaries = [c for c in gitlab.calls if "## argus review" in c["body"]]
+    assert len(summaries) == 1

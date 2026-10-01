@@ -63,6 +63,11 @@ def registered_tools() -> list[dict]:
                                      "f1": FileChange(file_id="f1", path="x",
                                                       change_kind="modified")})
 
+    # Sister-repo tools exist only for repos with related repos configured; one placeholder lists them.
+    from argus.review.sisters import Sister, build_sister_tools
+    tools += build_sister_tools([Sister("sister", "group/sister", Path("."), "main", "0" * 40,
+                                        "placeholder")])
+
     import inspect
 
     seen: dict[str, dict] = {}

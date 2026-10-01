@@ -44,6 +44,25 @@ def decay_weight(age_days: float, half_life_days: float = 90.0) -> float:
     return max(0.0, 0.5 ** (age_days / half_life_days))
 
 
+def reputation_sql_expr(hit_col, harmful_col, ignored_col, miss_col, z: float = 1.96):
+    """SQL expression mirroring reputation()/wilson_lower_bound() exactly, so
+    the Learnings filter builder can threshold "strength" server-side without
+    fetching every row. Kept in lockstep with the Python version above --
+    tests compare the two over a value matrix, so change both together."""
+    from sqlalchemy import case, func
+
+    successes = hit_col
+    failures = HARMFUL_WEIGHT * harmful_col + ignored_col + miss_col
+    n = successes + failures
+    safe_n = func.nullif(n, 0)
+    phat = successes / safe_n
+    denom = 1.0 + (z * z) / safe_n
+    centre = phat + (z * z) / (2 * safe_n)
+    margin = z * func.sqrt((phat * (1 - phat) + (z * z) / (4 * safe_n)) / safe_n)
+    bounded = func.greatest(0.0, func.least(1.0, (centre - margin) / denom))
+    return case((n <= 0, NEUTRAL), else_=bounded)
+
+
 def reputation(hit: float, harmful: float, ignored: float, miss: float) -> float:
     """Collapse weighted verdict counts into a [0,1] strength score.
 

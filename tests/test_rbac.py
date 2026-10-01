@@ -41,20 +41,27 @@ async def test_wrong_token_is_401_even_with_admin_token_configured(both_tokens_a
 
 
 async def test_me_reports_role_and_label(both_tokens_api):
+    from argus.api.permissions import permissions_for
+
     admin = await both_tokens_api.get(
         "/me", headers={"Authorization": "Bearer admin-sekrit"})
     assert admin.status_code == 200
-    assert admin.json() == {"role": "admin", "label": "admin-token"}
+    assert admin.json() == {"role": "admin", "label": "admin-token",
+                            "permissions": permissions_for("admin")}
 
     user = await both_tokens_api.get(
         "/me", headers={"Authorization": "Bearer user-sekrit"})
-    assert user.json() == {"role": "user", "label": "user-token"}
+    assert user.json() == {"role": "user", "label": "user-token",
+                           "permissions": permissions_for("user")}
 
 
 async def test_me_reports_anonymous_when_no_token_configured(engine, settings):
+    from argus.api.permissions import permissions_for
+
     app = create_app(settings=settings, engine=engine)  # api_token == ""
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         r = await c.get("/me")
     assert r.status_code == 200
-    assert r.json() == {"role": "user", "label": "anonymous"}
+    assert r.json() == {"role": "user", "label": "anonymous",
+                        "permissions": permissions_for("user")}
