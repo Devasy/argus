@@ -417,6 +417,7 @@ async def test_sweep_is_bounded_and_resumes_past_ineligible_prefix(sf, monkeypat
         _, ready, _ = await _mr_disc(s)
         ready.repo_id, ready.mr_iid = repo.id, 4
         ready_disc = await _resolved_bot_thread(s, ready)
+        ready_disc.resolved = False
         for note in (await s.execute(select(distill_threads.Note).where(
             distill_threads.Note.discussion_id == ready_disc.id))).scalars():
             note.note_created_at = now - timedelta(minutes=20)
@@ -435,7 +436,7 @@ async def test_sweep_is_bounded_and_resumes_past_ineligible_prefix(sf, monkeypat
         await s.commit()
     async with sf() as s:
         loaded = await s.get(type(repo), repo.id)
-        assert await distill_threads.sweep_pending_threads(s, loaded, now) == 1
+        assert await distill_threads.sweep_pending_threads(s, loaded, now) == 0
         assert len(visits) == 4 and len(set(visits)) == 4
         assert await read_cursor(s, repo.id, "thread_sweep_cursor") is None
         await s.commit()
@@ -446,6 +447,56 @@ async def test_sweep_is_bounded_and_resumes_past_ineligible_prefix(sf, monkeypat
         assert await distill_threads.sweep_pending_threads(s, loaded, now) == 1
 
 
+@pytest.mark.parametrize("transition", ["quiet", "resolved", "closed", "backdated_reply"])
+async def test_newly_ready_threads_are_served_behind_cursor_before_backlog_wraps(sf, monkeypatch, transition):
+    monkeypatch.setattr(distill_threads, "SWEEP_SCAN_LIMIT", 2)
+    monkeypatch.setattr(distill_threads, "SWEEP_MR_LIMIT", 1)
+    now = datetime.now(timezone.utc)
+    async with sf() as s:
+        repo, mr, disc = await _mr_disc(s)
+        first = await _note(s, mr, disc, "human", "Discussion", 0)
+        first.note_created_at = now - timedelta(minutes=60)
+        for iid in range(2, 7):
+            _, other, d = await _mr_disc(s)
+            other.repo_id, other.mr_iid = repo.id, iid
+            note = await _note(s, other, d, "human", "Still talking", 0)
+            note.note_created_at = now - timedelta(minutes=60 - iid)
+        await s.commit()
+    async with sf() as s:
+        loaded = await s.get(type(repo), repo.id)
+        assert await distill_threads.sweep_pending_threads(s, loaded, now) == 0
+        saved = await read_cursor(s, repo.id, "thread_sweep_cursor")
+        assert saved and saved["mr_id"] != str(mr.id)
+        await s.commit()
+    visits = []
+    actual = distill_threads.enqueue_ready_threads
+    async def counting(session, target, *args, **kwargs):
+        visits.append(target.id)
+        return await actual(session, target, *args, **kwargs)
+    monkeypatch.setattr(distill_threads, "enqueue_ready_threads", counting)
+    async with sf() as s:
+        loaded = await s.get(type(repo), repo.id)
+        target = await s.get(type(mr), mr.id)
+        discussion = await s.get(type(disc), disc.id)
+        tick = now
+        if transition == "quiet":
+            tick += timedelta(hours=25)
+        elif transition == "closed":
+            target.state = "closed"
+        else:
+            discussion.resolved = True
+            if transition == "backdated_reply":
+                # Even a historical import must be picked up behind the cursor.
+                await _note(s, target, discussion, "human", "Imported reply", -120)
+        await s.flush()
+        assert await distill_threads.sweep_pending_threads(s, loaded, tick) == 1
+        assert visits == [mr.id], "fresh ready work does not wait for the backlog to wrap"
+        ledger = (await s.execute(select(distill_threads.DistillThread).where(
+            distill_threads.DistillThread.discussion_id == disc.id))).scalar_one()
+        assert ledger.status == "queued"
+        assert await read_cursor(s, repo.id, "thread_sweep_cursor") == saved
+
+
 @pytest.mark.parametrize("cursor", [{"oldest": "broken", "mr_id": "broken"},
                                   {"oldest": "2026-10-01", "mr_id": str(uuid.uuid4())},
                                   {}, "bad type"])
@@ -454,6 +505,29 @@ async def test_sweep_recovers_from_bad_or_naive_cursors(db, monkeypatch, cursor)
     await _resolved_bot_thread(db, mr)
     await write_cursor(db, repo.id, "thread_sweep_cursor", cursor)
     assert await distill_threads.sweep_pending_threads(db, repo, datetime.now(timezone.utc)) == 1
+    assert await read_cursor(db, repo.id, "thread_sweep_cursor") is None
+
+
+async def test_ready_first_sweep_obeys_both_caps_and_drains_ready_backlog(db, monkeypatch):
+    monkeypatch.setattr(distill_threads, "SWEEP_SCAN_LIMIT", 3)
+    monkeypatch.setattr(distill_threads, "SWEEP_MR_LIMIT", 2)
+    repo, mr, _ = await _mr_disc(db)
+    await _resolved_bot_thread(db, mr)
+    for iid in range(2, 6):
+        _, other, _ = await _mr_disc(db)
+        other.repo_id, other.mr_iid = repo.id, iid
+        await _resolved_bot_thread(db, other)
+    await db.flush()
+    actual = distill_threads.enqueue_ready_threads
+    visits = []
+    async def counting(session, target, *args, **kwargs):
+        visits.append(target.id)
+        return await actual(session, target, *args, **kwargs)
+    monkeypatch.setattr(distill_threads, "enqueue_ready_threads", counting)
+    for expected in (2, 2, 1):
+        visits.clear()
+        assert await distill_threads.sweep_pending_threads(db, repo, datetime.now(timezone.utc)) == expected
+        assert len(visits) <= 3 and len(set(visits)) == len(visits)
     assert await read_cursor(db, repo.id, "thread_sweep_cursor") is None
 
 
