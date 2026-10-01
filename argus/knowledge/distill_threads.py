@@ -324,6 +324,7 @@ async def sweep_pending_threads(session: AsyncSession, repo, now: datetime, *,
         .join(humans, humans.c.discussion_id == Discussion.id)
         .outerjoin(lt, lt.discussion_id == Discussion.id)
         .where(MergeRequest.repo_id == repo.id, humans.c.human_count > 0,
+               humans.c.opener != "external_bot",
                or_(lt.id.is_(None),
                    lt.content_hash != humans.c.content_hash,
                    and_(lt.status == "failed", lt.attempts < MAX_THREAD_ATTEMPTS),
@@ -332,7 +333,6 @@ async def sweep_pending_threads(session: AsyncSession, repo, now: datetime, *,
                         lt.attempts < MAX_THREAD_ATTEMPTS))))
     candidates = pending.group_by(MergeRequest.id).subquery()
     ready_candidates = (pending.where(
-        humans.c.opener != "external_bot",
         or_(MergeRequest.state.in_(("merged", "closed")), Discussion.resolved.is_(True),
             humans.c.last_human <= now - timedelta(hours=quiet_hours)))
         .group_by(MergeRequest.id).subquery())

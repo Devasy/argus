@@ -409,11 +409,8 @@ async def test_sweep_is_bounded_and_resumes_past_ineligible_prefix(sf, monkeypat
         for iid in (2, 3):
             _, other, d = await _mr_disc(s)
             other.repo_id, other.mr_iid = repo.id, iid
-            opener = await _note(s, other, d, "external_bot", "External review", 0)
-            opener.note_created_at = now - timedelta(minutes=40)
             note = await _note(s, other, d, "human", "Reply", 0)
             note.note_created_at = now - timedelta(minutes=30)
-            d.resolved = True
         _, ready, _ = await _mr_disc(s)
         ready.repo_id, ready.mr_iid = repo.id, 4
         ready_disc = await _resolved_bot_thread(s, ready)
@@ -529,6 +526,28 @@ async def test_ready_first_sweep_obeys_both_caps_and_drains_ready_backlog(db, mo
         assert await distill_threads.sweep_pending_threads(db, repo, datetime.now(timezone.utc)) == expected
         assert len(visits) <= 3 and len(set(visits)) == len(visits)
     assert await read_cursor(db, repo.id, "thread_sweep_cursor") is None
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_external_bot_only_discussions_never_consume_scan_budget(db, monkeypatch, mixed):
+    repo, mr, disc = await _mr_disc(db)
+    mr.state = "closed"
+    await _note(db, mr, disc, "external_bot", "External review", -60)
+    await _note(db, mr, disc, "human", "Done", -30)
+    await db.flush()
+    if mixed:
+        eligible = await _resolved_bot_thread(db, mr)
+    actual = distill_threads.enqueue_ready_threads
+    visited = []
+    async def counting(session, target, *args, **kwargs):
+        visited.append(target.id)
+        return await actual(session, target, *args, **kwargs)
+    monkeypatch.setattr(distill_threads, "enqueue_ready_threads", counting)
+    assert await distill_threads.sweep_pending_threads(db, repo, datetime.now(timezone.utc)) == int(mixed)
+    assert visited == ([mr.id] if mixed else [])
+    ledger = (await db.execute(select(distill_threads.DistillThread).where(
+        distill_threads.DistillThread.mr_id == mr.id))).scalars().all()
+    assert [row.discussion_id for row in ledger] == ([eligible.id] if mixed else [])
 
 
 async def test_background_cursors_do_not_clobber_each_other_or_ingestion(sf):
