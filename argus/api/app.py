@@ -1146,13 +1146,15 @@ def create_app(settings: Settings | None = None,
             rows = (await session.execute(select(DistillThread).where(
                 DistillThread.distillation_run_id == run_id)
                 .order_by(DistillThread.created_at))).scalars().all()
+            discussion_ids = list(dict.fromkeys(
+                [r.discussion_id for r in rows] + [r.discussion_id for r in saved]))
             labels: dict = {}
-            if rows:
+            if discussion_ids:
                 for did, disp in (await session.execute(
                         select(Note.discussion_id, Note.disposition).where(
-                            Note.discussion_id.in_([r.discussion_id for r in rows]),
+                            Note.discussion_id.in_(discussion_ids),
                             Note.author_type == "bot")
-                        .order_by(Note.note_created_at))).all():
+                        .order_by(Note.note_created_at, Note.id))).all():
                     labels.setdefault(did, disp)
             mr = await session.get(MergeRequest, run.mr_id)
             preview_ids = list(dict.fromkeys(
@@ -1171,9 +1173,13 @@ def create_app(settings: Settings | None = None,
                 threads = [DistillThreadOut.model_validate(r.decision) for r in saved]
                 # Backfilled decisions have no captured conversation. Use an
                 # available current preview without replacing genuine snapshots.
-                for thread in threads:
+                for record, thread in zip(saved, threads, strict=True):
                     if thread.thread is None:
                         thread.thread = thread_views.get(thread.discussion_id)
+                    if (thread.thread_type == "bot_thread"
+                            and thread.reconciler_label is None
+                            and not record.decision.get("thread")):
+                        thread.reconciler_label = labels.get(thread.discussion_id)
             return DistillationRunOut(threads=threads,
                 id=run.id, mr_id=run.mr_id, status=run.status, trigger=run.trigger,
                 note_ids=run.note_ids, error=run.error,

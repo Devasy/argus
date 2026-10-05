@@ -2,6 +2,7 @@ from typing import Any
 
 from langchain_litellm import ChatLiteLLM
 from langchain_core.messages import BaseMessage
+from litellm import ContextWindowExceededError
 from pydantic import Field
 
 from argus.llm.config import LLMConfig
@@ -16,6 +17,8 @@ class _FallbackChatLiteLLM(ChatLiteLLM):
         try:
             return super()._generate(messages, stop=stop, run_manager=run_manager,
                                      stream=stream, **kwargs)
+        except ContextWindowExceededError:
+            raise
         except Exception:
             if self.fallback_model is None or (self.streaming if stream is None else stream):
                 raise
@@ -26,6 +29,8 @@ class _FallbackChatLiteLLM(ChatLiteLLM):
         try:
             return await super()._agenerate(messages, stop=stop, run_manager=run_manager,
                                             stream=stream, **kwargs)
+        except ContextWindowExceededError:
+            raise
         except Exception:
             if self.fallback_model is None or (self.streaming if stream is None else stream):
                 raise
@@ -38,6 +43,8 @@ class _FallbackChatLiteLLM(ChatLiteLLM):
             for chunk in super()._stream(messages, stop=stop, run_manager=run_manager, **kwargs):
                 started = True
                 yield chunk
+        except ContextWindowExceededError:
+            raise
         except Exception:
             if started or self.fallback_model is None:
                 raise
@@ -50,6 +57,8 @@ class _FallbackChatLiteLLM(ChatLiteLLM):
             async for chunk in super()._astream(messages, stop=stop, run_manager=run_manager, **kwargs):
                 started = True
                 yield chunk
+        except ContextWindowExceededError:
+            raise
         except Exception:
             if started or self.fallback_model is None:
                 raise
@@ -131,6 +140,6 @@ def build_chat_model(cfg: LLMConfig, callbacks: list | None = None) -> ChatLiteL
             "provider": provider, "model": fallback["model"],
             "api_base": fallback.get("api_base"), "api_key": fallback.get("api_key"),
             "fallback": None, "langfuse_handler": None})
-        kwargs["fallback_model"] = build_chat_model(fallback_cfg)
+        kwargs["fallback_model"] = build_chat_model(fallback_cfg, callbacks=kwargs["callbacks"])
     model_cls = _GroqChatLiteLLM if cfg.provider == "groq" else _FallbackChatLiteLLM
     return model_cls(**kwargs)

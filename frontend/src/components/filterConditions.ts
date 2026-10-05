@@ -48,9 +48,8 @@ export function operatorFor(field: FieldDef, key: string): OperatorDef | undefin
   return field.operators.find((o) => o.key === key);
 }
 
-/** Flat AND of every condition's params -- a later condition on the same
- * query key overwrites an earlier one, since the field pickers only ever
- * expose one condition per field/operator pair worth adding twice. */
+/** Flat AND of condition params. The first valid condition for each field
+ * wins; later conditions for that field are skipped. */
 export function buildQueryParams(
   fields: FieldDef[],
   conditions: Condition[],

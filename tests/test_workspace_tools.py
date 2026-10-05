@@ -367,6 +367,14 @@ def test_git_does_not_retry_a_real_error(monkeypatch):
     assert len(calls) == 1
 
 
+def test_git_diagnostics_redact_userinfo_with_slashes():
+    from argus.review.workspace import _safe_git_error
+    message = "unable to access https://user:pass/word@host/repo.git: failed"
+    safe = _safe_git_error(message, None)
+    assert "pass" not in safe and "word" not in safe
+    assert "https://[redacted]@host/repo.git" in safe
+
+
 async def test_http_credentials_never_enter_argv_or_logged_traceback(tmp_path, monkeypatch):
     import traceback
     import pytest
@@ -440,3 +448,42 @@ async def test_http_authentication_works_without_persisting_credentials(tmp_path
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+async def test_windows_cleanup_recovers_only_an_empty_worktree_directory(tmp_path, monkeypatch):
+    import argus.review.workspace as ws
+    url, sha = _make_origin(tmp_path)
+    wm = WorkspaceManager(tmp_path / "root", url)
+    wt = await wm.acquire(sha)
+    real_run = ws._run
+
+    def partially_removed(args, cwd=None, **kwargs):
+        real_run(args, cwd=cwd, **kwargs)
+        if args[:3] == ["git", "worktree", "remove"]:
+            wt.mkdir(exist_ok=True)
+            raise RuntimeError("failed to delete directory: Permission denied")
+
+    monkeypatch.setattr(ws, "_WINDOWS", True)
+    monkeypatch.setattr(ws, "_run", partially_removed)
+    await wm.release(sha)
+    assert not wt.exists()
+
+
+async def test_windows_cleanup_preserves_nonempty_worktree_on_failure(tmp_path, monkeypatch):
+    import pytest
+    import argus.review.workspace as ws
+    url, sha = _make_origin(tmp_path)
+    wm = WorkspaceManager(tmp_path / "root", url)
+    wt = await wm.acquire(sha)
+    real_run = ws._run
+
+    def blocked(args, cwd=None, **kwargs):
+        if args[:3] == ["git", "worktree", "remove"]:
+            raise RuntimeError("failed to delete directory: Permission denied")
+        real_run(args, cwd=cwd, **kwargs)
+
+    monkeypatch.setattr(ws, "_WINDOWS", True)
+    monkeypatch.setattr(ws, "_run", blocked)
+    with pytest.raises(RuntimeError, match="Permission denied"):
+        await wm.release(sha)
+    assert (wt / "hello.py").read_text().startswith("x = 1")

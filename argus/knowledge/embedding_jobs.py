@@ -21,6 +21,7 @@ from argus.knowledge.embeddings import EmbeddingError, embed_text
 logger = logging.getLogger("argus.embedding_jobs")
 REPAIR_LIMIT = 100
 REPAIR_INTERVAL_S = 3600
+REPAIR_BACKLOG_DELAY_S = 1
 EMBEDDING_TIMEOUT_S = 120
 
 
@@ -86,6 +87,7 @@ async def run_embedding_worker(sf, base_settings, stop, *, worker_id):
 
     async def repair():
         while not stop.is_set():
+            count = 0
             try:
                 async with sf() as s:
                     count = await recover_missing_embeddings(s)
@@ -95,7 +97,8 @@ async def run_embedding_worker(sf, base_settings, stop, *, worker_id):
             except Exception:
                 logger.exception("embedding repair sweep failed")
             try:
-                await asyncio.wait_for(stop.wait(), timeout=REPAIR_INTERVAL_S)
+                await asyncio.wait_for(stop.wait(), timeout=(
+                    REPAIR_BACKLOG_DELAY_S if count >= REPAIR_LIMIT else REPAIR_INTERVAL_S))
             except TimeoutError:
                 pass
 

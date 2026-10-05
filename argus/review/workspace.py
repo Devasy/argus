@@ -13,11 +13,12 @@ _TRANSIENT = ("Could not resolve host", "Temporary failure in name resolution",
               "No address associated with hostname", "Failed to connect",
               "Connection timed out")
 _RETRY_DELAYS_S = (2, 5)
+_WINDOWS = os.name == "nt"
 
 
 def _safe_git_error(message: str, env: dict[str, str] | None) -> str:
     """Remove URL credentials and runtime authorization from Git diagnostics."""
-    message = re.sub(r"(https?://)[^/\s@]+@", r"\1[redacted]@", message)
+    message = re.sub(r"(https?://)[^\s@]+@", r"\1[redacted]@", message)
     for key, value in (env or {}).items():
         if key.startswith("GIT_CONFIG_VALUE_") and value.startswith("Authorization: Basic "):
             encoded = value.removeprefix("Authorization: Basic ")
@@ -122,8 +123,11 @@ class WorkspaceManager:
             else:
                 # Replace legacy credential-bearing remotes before fetching;
                 # current credentials are supplied only through the environment.
-                git(["git", "remote", "set-url", "origin", clone_url],
-                     cwd=self.bare)
+                remote = subprocess.run(["git", "remote", "get-url", "origin"],
+                                        cwd=self.bare, capture_output=True, text=True)
+                if remote.returncode or remote.stdout.strip() != clone_url:
+                    git(["git", "remote", "set-url", "origin", clone_url],
+                        cwd=self.bare)
                 git(["git", "fetch", "origin", "+refs/heads/*:refs/heads/*"],
                      cwd=self.bare)
             if mr_iid is not None:
@@ -171,8 +175,28 @@ class WorkspaceManager:
         def _sync() -> None:
             wt = self.root / f"wt-{commit[:12]}"
             if wt.exists():
-                _run(["git", "worktree", "remove", "--force", str(wt)],
-                     cwd=self.bare)
+                try:
+                    _run(["git", "worktree", "remove", "--force", str(wt)],
+                         cwd=self.bare)
+                except RuntimeError as error:
+                    # Windows can hold the directory after
+                    # Git has removed its files and registration. Recover only
+                    # that empty directory, never recursively delete leftovers.
+                    if (not _WINDOWS or "Permission denied" not in str(error)
+                            or wt.resolve().parent != self.root.resolve()
+                            or not wt.is_dir() or any(wt.iterdir())):
+                        raise
+                    for delay in (0.1, 0.5, 2, 5):
+                        try:
+                            wt.rmdir()
+                            break
+                        except FileNotFoundError:
+                            break
+                        except PermissionError:
+                            time.sleep(delay)
+                    else:
+                        raise error
+                    _run(["git", "worktree", "prune"], cwd=self.bare)
         async with _repo_lock(self.root):
             key = str((self.root / f"wt-{commit[:12]}").resolve())
             if key in self._held:

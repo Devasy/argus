@@ -177,6 +177,7 @@ async def test_run_history_survives_new_replies_and_a_second_distillation(engine
         await apply_decisions(sf, settings, repo, mr, [thread], {disc.id: decision}, [], runs[0].id)
         async with sf() as s:
             (await s.get(Note, thread.human_notes[-1].id)).body = "Edited later"
+            (await s.get(Note, thread.bot_note.id)).disposition = "answered"
             await _note(s, mr, disc, "human", "New reply", 10)
             [new_thread] = await distill_threads.load_threads(s, mr)
             await s.commit()
@@ -187,6 +188,7 @@ async def test_run_history_survives_new_replies_and_a_second_distillation(engine
                 DistillationDecision.distillation_run_id == runs[0].id))).scalar_one()
             original = saved.decision
             assert original["reply_verdict"] == "rejected"
+            assert original["reconciler_label"] == "open"
             assert len(original["thread"]["notes"]) == 2
             assert original["thread"]["notes"][-1]["body"] == "intentional, closed in finally"
             assert (await s.execute(select(DistillThread).where(
@@ -238,6 +240,7 @@ async def test_backfilled_preview_does_not_require_a_current_ledger_row(engine, 
         saved = (await s.execute(select(DistillationDecision).where(
             DistillationDecision.distillation_run_id == run.id))).scalar_one()
         saved.decision = {k: v for k, v in saved.decision.items() if k != "thread"}
+        saved.decision.pop("reconciler_label", None)
         await s.commit()
     try:
         async with AsyncClient(transport=ASGITransport(app=create_app(settings, engine)),
@@ -246,6 +249,7 @@ async def test_backfilled_preview_does_not_require_a_current_ledger_row(engine, 
         assert response.status_code == 200
         [decision] = response.json()["threads"]
         assert decision["reply_verdict"] == "accepted"
+        assert decision["reconciler_label"] == "open"
         assert decision["thread"]["discussion_id"] == str(disc.id)
         assert len(decision["thread"]["notes"]) == 2
         async with sf() as s:

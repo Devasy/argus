@@ -170,7 +170,6 @@ function EditRepoSettings({
         <Toggle checked={autoReview} onChange={setAutoReview} label="Auto-review on poll" />
       </div>
       <RepoAgentsPanel repoId={repoId} />
-      <RepoSistersPanel repoId={repoId} />
       <div className="form-actions">
         <button className="btn-o" onClick={onClose}>
           Cancel
@@ -247,6 +246,8 @@ export default function RepoDetail() {
           onClose={() => setEditing(false)}
         />
       )}
+
+      {repo.data && <RepoSistersPanel key={repo.data.id} repoId={repo.data.id} />}
 
       {mrs.error && <ErrorBox message={mrs.error.message} onRetry={mrs.refetch} />}
       {mrs.isPending && <div className="spinner">Loading merge requests…</div>}

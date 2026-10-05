@@ -22,7 +22,7 @@ export default function FilterBuilder({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerQuery, setPickerQuery] = useState("");
   const pickerRef = useRef<HTMLDivElement>(null);
-  useClickOutside(pickerRef, () => setPickerOpen(false));
+  useClickOutside(pickerRef, () => setPickerOpen(false), pickerOpen);
 
   const usedFields = useMemo(() => new Set(conditions.map((c) => c.field)), [conditions]);
 

@@ -1,4 +1,5 @@
 from langchain_core.messages import AIMessage
+import pytest
 
 from argus.llm.config import LLMConfig
 from argus.llm.factory import _GroqChatLiteLLM, build_chat_model
@@ -14,6 +15,68 @@ def _cfg(**overrides):
 def _prior_ai_turn_with_reasoning():
     return [AIMessage(content="done thinking", additional_kwargs={
         "reasoning_content": "step by step reasoning that Groq rejects"})]
+
+
+def test_fallback_keeps_callbacks_without_duplicating_langfuse():
+    from langchain_core.callbacks import BaseCallbackHandler
+    tracer, langfuse = BaseCallbackHandler(), BaseCallbackHandler()
+    model = build_chat_model(_cfg(langfuse_handler=langfuse,
+        fallback={"provider": "groq", "model": "groq/fallback"}), callbacks=[tracer])
+    assert model.callbacks == model.fallback_model.callbacks == [tracer, langfuse]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_sync_context_overflow_reaches_caller_without_fallback(monkeypatch, stream):
+    from langchain_litellm import ChatLiteLLM
+    from litellm import ContextWindowExceededError
+    error = ContextWindowExceededError(message="context exceeded", model="primary", llm_provider="openai")
+    calls = []
+
+    def fail(self, *args, **kwargs):
+        calls.append(self.model)
+        raise error
+        yield  # The streaming path must be a generator.
+
+    def fail_generate(self, *args, **kwargs):
+        calls.append(self.model)
+        raise error
+
+    monkeypatch.setattr(ChatLiteLLM, "_stream" if stream else "_generate", fail if stream else fail_generate)
+    model = build_chat_model(_cfg(fallback={"provider": "groq", "model": "groq/fallback"}))
+    with pytest.raises(ContextWindowExceededError) as caught:
+        if stream:
+            list(model._stream(_prior_ai_turn_with_reasoning()))
+        else:
+            model._generate(_prior_ai_turn_with_reasoning())
+    assert caught.value is error
+    assert calls == [model.model]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_async_context_overflow_reaches_caller_without_fallback(monkeypatch, stream):
+    from langchain_litellm import ChatLiteLLM
+    from litellm import ContextWindowExceededError
+    error = ContextWindowExceededError(message="context exceeded", model="primary", llm_provider="openai")
+    calls = []
+
+    async def fail(self, *args, **kwargs):
+        calls.append(self.model)
+        raise error
+        yield
+
+    async def fail_generate(self, *args, **kwargs):
+        calls.append(self.model)
+        raise error
+
+    monkeypatch.setattr(ChatLiteLLM, "_astream" if stream else "_agenerate", fail if stream else fail_generate)
+    model = build_chat_model(_cfg(fallback={"provider": "groq", "model": "groq/fallback"}))
+    with pytest.raises(ContextWindowExceededError) as caught:
+        if stream:
+            [chunk async for chunk in model._astream(_prior_ai_turn_with_reasoning())]
+        else:
+            await model._agenerate(_prior_ai_turn_with_reasoning())
+    assert caught.value is error
+    assert calls == [model.model]
 
 
 def test_build_chat_model_sends_reasoning_budget_for_ollama_provider():

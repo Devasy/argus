@@ -368,10 +368,48 @@ async def test_failed_fetch_does_not_advance_the_audit_cache(db, settings, remot
     remote.fail_acquire = True
     with pytest.raises(RuntimeError, match="Fetch failed"):
         await audit_scheduler._schedule_repo(db, settings, repo.id, now)
+    assert remote.releases == []
     assert await read_cursor(db, repo.id, "audit_cursor") is None
     remote.fail_acquire = False
     await audit_scheduler._schedule_repo(db, settings, repo.id, now)
     assert len(remote.acquisitions) == 2
+
+
+async def test_embedding_repair_drains_bounded_backlog_before_hourly_wait(monkeypatch, settings):
+    from contextlib import asynccontextmanager
+    stop = asyncio.Event()
+    counts = iter([embedding_jobs.REPAIR_LIMIT, 1])
+    scans, waits = [], []
+
+    class Session:
+        async def commit(self):
+            pass
+
+    @asynccontextmanager
+    async def factory():
+        yield Session()
+
+    async def recover(*args):
+        count = next(counts)
+        scans.append(count)
+        return count
+
+    async def wait(awaitable, *, timeout):
+        awaitable.close()
+        waits.append(timeout)
+        if len(waits) == 1:
+            raise TimeoutError
+        stop.set()
+
+    async def worker(*args, **kwargs):
+        await stop.wait()
+
+    monkeypatch.setattr(embedding_jobs, "recover_missing_embeddings", recover)
+    monkeypatch.setattr(embedding_jobs, "run_worker_forever", worker)
+    monkeypatch.setattr(embedding_jobs.asyncio, "wait_for", wait)
+    await embedding_jobs.run_embedding_worker(factory, settings, stop, worker_id="test")
+    assert scans == [embedding_jobs.REPAIR_LIMIT, 1]
+    assert waits == [embedding_jobs.REPAIR_BACKLOG_DELAY_S, embedding_jobs.REPAIR_INTERVAL_S]
 
 
 async def test_unavailable_branch_is_retried_and_head_uses_provider_default(db, settings, remote):

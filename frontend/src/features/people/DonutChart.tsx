@@ -57,7 +57,7 @@ export default function DonutChart({
                     strokeWidth={STROKE}
                     strokeDasharray={dash}
                     strokeDashoffset={-offset}
-                    strokeLinecap="round"
+                    strokeLinecap="butt"
                     transform={`rotate(-90 ${SIZE / 2} ${SIZE / 2})`}
                   />
                 );

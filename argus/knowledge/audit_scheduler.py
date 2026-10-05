@@ -136,6 +136,7 @@ async def _schedule_repo(s, settings, repo_id, now):
                 Path(settings.workspace_root).expanduser() / str(repo.id),
                 f"{settings.gitlab_url.replace('://', f'://oauth2:{settings.gitlab_token}@')}"
                 f"/{repo.project_path}.git")
+            acquired = False
             try:
                 # If every learning was checked at this very tip, no checkout
                 # is needed even on the first tick after restart/deployment.
@@ -143,6 +144,7 @@ async def _schedule_repo(s, settings, repo_id, now):
                 diffs = {}
                 if baselines:
                     workspace = await wm.acquire(sha)
+                    acquired = True
                     for baseline in baselines:
                         diffs[baseline] = await asyncio.to_thread(
                             changed_paths_since, workspace, baseline)
@@ -156,7 +158,7 @@ async def _schedule_repo(s, settings, repo_id, now):
                         due = 1
                         break
             finally:
-                if baselines:
+                if acquired:
                     await wm.release(sha)
             if not due:
                 await write_cursor(s, repo.id, "audit_cursor", cursor)

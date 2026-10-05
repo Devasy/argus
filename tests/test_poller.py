@@ -487,33 +487,36 @@ async def test_run_poller_forever_rereads_interval(engine):
     assert calls, "get_interval was never consulted"
 
 
-async def test_run_poller_forever_survives_get_interval_failure(engine):
+async def test_run_poller_forever_survives_get_interval_failure(engine, monkeypatch):
     """A transient failure in get_interval (e.g. a DB blip while loading
     effective settings) must not kill the poller loop: it should log, fall
     back to the static interval_s for that cycle, and keep polling."""
     import asyncio
     from argus.db import session_factory
-    from argus.ingest.poller import run_poller_forever
+    from argus.ingest import poller as poller_module
 
     calls = []
+    stop = asyncio.Event()
+
+    async def noop_poll(*args):
+        return 0
+
+    monkeypatch.setattr(poller_module, "poll_repo", noop_poll)
 
     async def get_interval():
         calls.append(1)
         if len(calls) == 1:
             raise RuntimeError("transient settings-load failure")
+        stop.set()
         return 0.01
 
-    stop = asyncio.Event()
     sf = session_factory(engine)
     # interval_s is the fallback used for the cycle where get_interval raises;
     # keep it short so the loop reaches a second get_interval call quickly.
-    task = asyncio.create_task(
-        run_poller_forever(sf, _NoopClient, stop, interval_s=0.05,
-                           get_interval=get_interval))
-    await asyncio.sleep(0.3)
-    stop.set()
-    await task
-    assert len(calls) >= 2, (
+    await asyncio.wait_for(
+        poller_module.run_poller_forever(sf, _NoopClient, stop, interval_s=0.05,
+                                       get_interval=get_interval), timeout=10)
+    assert len(calls) == 2, (
         "poller loop did not survive a raising get_interval "
         f"(get_interval called {len(calls)} time(s))")
 
