@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from argus.domain.models import AuditRun, AuditVerdict, Job, Learning
@@ -19,6 +19,12 @@ from tests.distill_helpers import _mr_disc, _note, _resolved_bot_thread
 async def sf(engine):
     async with engine.connect() as conn:
         transaction = await conn.begin()
+        # These queue/recovery cases require an empty embedding backlog. Hide
+        # other tests' committed jobs and missing vectors only inside this
+        # rollback-only transaction; never remove shared fixtures permanently.
+        await conn.execute(delete(Job).where(Job.kind == "embed_learning"))
+        await conn.execute(update(Learning).where(
+            Learning.status == "active", Learning.embedding.is_(None)).values(status="archived"))
         yield async_sessionmaker(conn, expire_on_commit=False,
                                  join_transaction_mode="create_savepoint")
         await transaction.rollback()
@@ -208,7 +214,8 @@ async def test_embedding_worker_recovers_vectors_without_chat_lanes(engine, sett
         await s.commit()
     stop = asyncio.Event()
     async def embed(*args, **kwargs):
-        stop.set()
+        if args[0] == "Cleanup :: From before deployment":
+            stop.set()
         return [0.2] * 768
     monkeypatch.setattr(embedding_jobs, "embed_text", embed)
     try:

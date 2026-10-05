@@ -227,7 +227,7 @@ async def test_search_learnings_tool_returns_formatted_candidates(db, settings, 
         await db.commit()
 
 
-async def test_upsert_learning_tool_create_and_update(db, settings, monkeypatch):
+async def test_upsert_learning_tool_create_and_update(engine, settings, monkeypatch):
     from argus.domain.models import Learning
     from argus.review.tools import build_learnings_upsert_tool
     from sqlalchemy import select
@@ -237,34 +237,30 @@ async def test_upsert_learning_tool_create_and_update(db, settings, monkeypatch)
     monkeypatch.setattr(L, "embed_text", fake_embed)
 
     from argus.db import session_factory
-    sf = session_factory(db.bind)
-    tool = build_learnings_upsert_tool(sf, settings, repo_id=None)
-
-    create_result = await tool.ainvoke({
-        "action": "create", "topic": "topic A", "hint_text": "hint A",
-        "kind": "guidance", "file_paths": ["x.py"]})
-    assert "created" in create_result.lower() or "deduped" in create_result.lower()
-
+    from tests.distill_helpers import _mr_disc, purge_repos
+    sf = session_factory(engine)
     async with sf() as s:
-        row = (await s.execute(select(Learning).where(Learning.topic == "topic A"))
-              ).scalar_one()
-        learning_id = str(row.id)
-
-    update_result = await tool.ainvoke({
-        "action": "update", "learning_id": learning_id,
-        "topic": "topic A revised", "hint_text": "hint A revised", "kind": "guidance"})
-    assert "updated" in update_result.lower()
-
-    async with sf() as s:
-        refreshed = await s.get(Learning, row.id)
-        assert refreshed.topic == "topic A revised"
-
-    # cleanup: the tool commits internally (not rolled back by the `db`
-    # fixture), so remove the row to avoid leaking state into other tests
-    # that share the session-scoped test database.
-    async with sf() as s:
-        await s.delete(await s.get(Learning, row.id))
+        repo, _, _ = await _mr_disc(s)
         await s.commit()
+    tool = build_learnings_upsert_tool(sf, settings, repo_id=repo.id)
+    try:
+        create_result = await tool.ainvoke({
+            "action": "create", "topic": "topic A", "hint_text": "hint A",
+            "kind": "guidance", "file_paths": ["x.py"]})
+        assert "created" in create_result.lower()
+        async with sf() as s:
+            row = (await s.execute(select(Learning).where(
+                Learning.repo_id == repo.id, Learning.topic == "topic A"))).scalar_one()
+            learning_id = str(row.id)
+        update_result = await tool.ainvoke({
+            "action": "update", "learning_id": learning_id,
+            "topic": "topic A revised", "hint_text": "hint A revised", "kind": "guidance"})
+        assert "updated" in update_result.lower()
+        async with sf() as s:
+            refreshed = await s.get(Learning, row.id)
+            assert refreshed.topic == "topic A revised"
+    finally:
+        await purge_repos(engine, [repo.id])
 
 
 async def test_upsert_learning_tool_bad_learning_id_returns_error_string(db, settings, monkeypatch):
