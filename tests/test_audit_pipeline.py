@@ -116,6 +116,48 @@ async def test_pipeline_grounds_every_due_learning_and_records_stages(engine, se
         await purge_repos(engine, [repo.id])
 
 
+@pytest.mark.parametrize("fail_relation", [False, True])
+async def test_relation_lineage_uses_only_groundings_in_its_cluster(
+        engine, settings, tmp_path, monkeypatch, fail_relation):
+    from types import SimpleNamespace
+    from argus.knowledge import audit_agents as aa
+    from argus.knowledge import audit_pipeline as ap
+    from argus.knowledge import clustering
+    from argus.review import stages
+    from tests.distill_helpers import purge_repos
+    sf, repo, run, ids = await _seed(engine, 3)
+
+    async def clusters(*args, **kwargs):
+        return [[SimpleNamespace(id=uuid.UUID(i)) for i in ids[:2]]]
+
+    async def fake(model, tools, system_prompt, user_msg, response_model, max_rounds, **kwargs):
+        if response_model is aa.AuditScoutPlan:
+            return aa.AuditScoutPlan(groups=[aa.ScoutGroup(group_id=str(n), learning_ids=[i])
+                                             for n, i in enumerate(ids)])
+        if response_model is aa.GroundList:
+            return aa.GroundList(verdicts=[aa.GroundVerdict(learning_id=i, verdict="corroborated",
+                confidence=0.9, rationale="present") for i in ids if i in user_msg])
+        if response_model is aa.RelationList and fail_relation:
+            raise RuntimeError("test provider unavailable")
+        return response_model()
+
+    async def apply(*args):
+        return {}
+
+    monkeypatch.setattr(clustering, "cluster_learnings", clusters)
+    monkeypatch.setattr(stages, "run_stage_agent", fake)
+    monkeypatch.setattr(ap, "_apply", apply)
+    try:
+        await ap.run_audit_pipeline(_deps(sf, settings, repo, run, tmp_path), None)
+        async with sf() as s:
+            relation = (await s.execute(select(AuditStage).where(
+                AuditStage.audit_run_id == run.id, AuditStage.stage_name == "relate:k1"))).scalar_one()
+        assert relation.status == ("failed" if fail_relation else "done")
+        assert relation.artifact["_parent_stage_names"] == ["ground:g1", "ground:g2"]
+    finally:
+        await purge_repos(engine, [repo.id])
+
+
 async def test_a_learning_the_ground_agent_skips_gets_one_retry(engine, settings, tmp_path, monkeypatch):
     from argus.knowledge import audit_agents as aa
     from argus.knowledge import audit_pipeline as ap

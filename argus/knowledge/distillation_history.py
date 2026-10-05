@@ -31,7 +31,13 @@ async def save_decision(session, run_id, mr, thread, *, status,
         thread_type=thread.thread_type, status=status, reconciler_label=label,
         reply_verdict=reply_verdict, verdict_reason=verdict_reason,
         learning_ids=learning_ids or [], decision_reason=decision_reason, thread=view)
-    await session.execute(insert(DistillationDecision).values(
+    statement = insert(DistillationDecision).values(
         distillation_run_id=run_id, discussion_id=thread.discussion_id,
         content_hash=thread.content_hash, decision=decision.model_dump(mode="json"))
-        .on_conflict_do_nothing(index_elements=["distillation_run_id", "discussion_id"]))
+    # A failed attempt is provisional until this same run completes. Completed
+    # decisions stay immutable, including when another job replays the run.
+    await session.execute(statement.on_conflict_do_update(
+        index_elements=["distillation_run_id", "discussion_id"],
+        set_={"content_hash": statement.excluded.content_hash,
+              "decision": statement.excluded.decision},
+        where=DistillationDecision.decision["status"].astext == "failed"))

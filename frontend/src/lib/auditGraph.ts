@@ -109,11 +109,17 @@ export function buildAuditGraphNodes(stages: AuditStage[]): GraphNodeSpec[] {
       });
     } else if (RELATE_RE.test(stage_name)) {
       const [, group] = RELATE_RE.exec(stage_name)!;
-      // If group corresponds to a known ground group, connect from that group's terminal nodes.
-      // Otherwise (cluster relate), connect from all ground terminals.
-      const parentIds = groundGroups.has(group)
-        ? terminalNodesForGroup(group)
-        : (allGroundTerminals.length > 0 ? allGroundTerminals : (rawNames.has("scout") ? ["scout"] : []));
+      // Cluster names (k1, k2, ...) do not identify their input ground groups.
+      // Use backend-recorded lineage; legacy unknown clusters stay unconnected
+      // rather than inventing edges from every unrelated ground group.
+      const recorded = s.artifact?._parent_stage_names;
+      const parents = Array.isArray(recorded)
+        ? recorded.filter((id): id is string => typeof id === "string" && rawNames.has(id))
+        : (groundGroups.has(group) ? [`ground:${group}`] : []);
+      const parentIds = [...new Set(parents.flatMap((id) => {
+        const match = GROUND_RE.exec(id);
+        return match ? terminalNodesForGroup(match[1]) : [id];
+      }))];
       nodes.push(specFor(s, `relate (${group})`, "relate", AUDIT_LAYER.relate, parentIds));
     } else if (VERIFY_RE.test(stage_name)) {
       // Verify runs after all relate nodes (or ground terminals if relate is absent)

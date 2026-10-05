@@ -365,3 +365,78 @@ def test_git_does_not_retry_a_real_error(monkeypatch):
     with pytest.raises(RuntimeError, match="couldn't find remote ref"):
         ws._run(["git", "fetch", "origin", "x"])
     assert len(calls) == 1
+
+
+async def test_http_credentials_never_enter_argv_or_logged_traceback(tmp_path, monkeypatch):
+    import traceback
+    import pytest
+    import argus.review.workspace as ws
+    token = "dummy-test-password"
+    seen = []
+
+    def fail(args, **kw):
+        seen.append((args, kw.get("env")))
+        raise subprocess.CalledProcessError(128, args, stderr=f"authentication failed: {token}")
+
+    monkeypatch.setattr(ws.subprocess, "run", fail)
+    wm = WorkspaceManager(tmp_path / "root", f"https://oauth2:{token}@gitlab.test/group/repo.git")
+    with pytest.raises(RuntimeError) as caught:
+        await wm.acquire("a" * 40)
+    args, env = seen[0]
+    assert args[3] == "https://gitlab.test/group/repo.git"
+    assert token not in " ".join(args)
+    assert any(v.startswith("Authorization: Basic ") for v in env.values())
+    assert token not in "".join(traceback.format_exception(caught.value))
+
+
+async def test_http_authentication_works_without_persisting_credentials(tmp_path):
+    import base64
+    import functools
+    import threading
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import quote
+    url, sha = _make_origin(tmp_path)
+    served = tmp_path / "served"
+    served.mkdir()
+    bare = served / "repo.git"
+    subprocess.run(["git", "clone", "--bare", url, str(bare)], check=True, capture_output=True)
+    subprocess.run(["git", "update-server-info"], cwd=bare, check=True)
+    credentials = "oauth2:dummy:p@ss/word"
+    expected = "Basic " + base64.b64encode(credentials.encode()).decode()
+    authenticated = []
+
+    class Handler(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            if self.headers.get("Authorization") != expected:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="test"')
+                self.end_headers()
+                return
+            authenticated.append(self.path)
+            super().do_GET()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=str(served)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    root = tmp_path / "workspace"
+    clean_url = f"http://127.0.0.1:{server.server_port}/repo.git"
+    credential_url = clean_url.replace("http://", f"http://oauth2:{quote(credentials.partition(':')[2], safe='')}@")
+    wm = WorkspaceManager(root, credential_url)
+    try:
+        wt = await wm.acquire(sha)
+        assert (wt / "hello.py").read_text().startswith("x = 1")
+        # The existing-workspace path must authenticate again with runtime credentials.
+        await wm.acquire(sha)
+        config = (wm.bare / "config").read_text()
+        assert credential_url not in config
+        assert "dummy" not in config
+        assert clean_url in config
+        assert authenticated
+        await wm.release(sha)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

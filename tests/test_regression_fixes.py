@@ -202,6 +202,60 @@ async def test_run_history_survives_new_replies_and_a_second_distillation(engine
         await purge_repos(engine, [repo.id])
 
 
+async def test_same_run_retry_replaces_failure_but_never_a_completed_decision(db):
+    from argus.knowledge.distillation_history import save_decision
+    _, mr, _ = await _mr_disc(db)
+    disc = await _resolved_bot_thread(db, mr)
+    [thread] = await distill_threads.load_threads(db, mr)
+    run = DistillationRun(mr_id=mr.id, note_ids=[], status="running")
+    db.add(run)
+    await db.flush()
+    await save_decision(db, run.id, mr, thread, status="failed", decision_reason="provider outage")
+    await save_decision(db, run.id, mr, thread, status="done", reply_verdict="accepted",
+                        verdict_reason="Retry succeeded")
+    await save_decision(db, run.id, mr, thread, status="failed", decision_reason="late replay")
+    await save_decision(db, run.id, mr, thread, status="done", reply_verdict="rejected")
+    saved = (await db.execute(select(DistillationDecision).where(
+        DistillationDecision.distillation_run_id == run.id))).scalar_one()
+    assert saved.decision["status"] == "done"
+    assert saved.decision["reply_verdict"] == "accepted"
+    assert saved.decision["verdict_reason"] == "Retry succeeded"
+
+
+async def test_backfilled_preview_does_not_require_a_current_ledger_row(engine, settings):
+    from argus.knowledge.distillation_history import save_decision
+    from httpx import ASGITransport, AsyncClient
+    from argus.api.app import create_app
+    sf = session_factory(engine)
+    async with sf() as s:
+        repo, mr, _ = await _mr_disc(s)
+        disc = await _resolved_bot_thread(s, mr)
+        [thread] = await distill_threads.load_threads(s, mr)
+        run = DistillationRun(mr_id=mr.id, note_ids=[], status="done")
+        s.add(run)
+        await s.flush()
+        await save_decision(s, run.id, mr, thread, status="done", reply_verdict="accepted")
+        saved = (await s.execute(select(DistillationDecision).where(
+            DistillationDecision.distillation_run_id == run.id))).scalar_one()
+        saved.decision = {k: v for k, v in saved.decision.items() if k != "thread"}
+        await s.commit()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=create_app(settings, engine)),
+                               base_url="http://test") as client:
+            response = await client.get(f"/distillation-runs/{run.id}")
+        assert response.status_code == 200
+        [decision] = response.json()["threads"]
+        assert decision["reply_verdict"] == "accepted"
+        assert decision["thread"]["discussion_id"] == str(disc.id)
+        assert len(decision["thread"]["notes"]) == 2
+        async with sf() as s:
+            saved = (await s.execute(select(DistillationDecision).where(
+                DistillationDecision.distillation_run_id == run.id))).scalar_one()
+            assert "thread" not in saved.decision
+    finally:
+        await purge_repos(engine, [repo.id])
+
+
 @pytest.mark.parametrize("primary,fallback", [("ollama", "groq"), ("groq", "ollama")])
 async def test_provider_fallback_converts_original_history_and_preserves_tools(monkeypatch, primary, fallback):
     cfg = LLMConfig(provider=primary, model=f"{primary}/primary", num_retries=0,

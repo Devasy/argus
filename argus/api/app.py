@@ -1155,8 +1155,11 @@ def create_app(settings: Settings | None = None,
                         .order_by(Note.note_created_at))).all():
                     labels.setdefault(did, disp)
             mr = await session.get(MergeRequest, run.mr_id)
+            preview_ids = list(dict.fromkeys(
+                [r.discussion_id for r in rows] +
+                [r.discussion_id for r in saved if not r.decision.get("thread")]))
             thread_views = {t.discussion_id: t for t in await build_threads(
-                session, mr, [r.discussion_id for r in rows])} if rows and mr else {}
+                session, mr, preview_ids)} if preview_ids and mr else {}
             threads = [DistillThreadOut(
                 discussion_id=r.discussion_id, thread_type=r.thread_type, status=r.status,
                 reconciler_label=labels.get(r.discussion_id) if r.thread_type == "bot_thread" else None,
@@ -1166,6 +1169,11 @@ def create_app(settings: Settings | None = None,
                 for r in rows]
             if saved:
                 threads = [DistillThreadOut.model_validate(r.decision) for r in saved]
+                # Backfilled decisions have no captured conversation. Use an
+                # available current preview without replacing genuine snapshots.
+                for thread in threads:
+                    if thread.thread is None:
+                        thread.thread = thread_views.get(thread.discussion_id)
             return DistillationRunOut(threads=threads,
                 id=run.id, mr_id=run.mr_id, status=run.status, trigger=run.trigger,
                 note_ids=run.note_ids, error=run.error,
