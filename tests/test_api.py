@@ -538,10 +538,11 @@ async def test_review_sequence_numbers_only_done_reviews_by_finished_at(api, eng
             await conn.execute(delete(Repository).where(Repository.id == repo_id))
 
 
-async def test_reconcile_and_distill_enqueues_one_batched_run(api, engine, monkeypatch):
-    from datetime import datetime, timezone
+async def test_reconcile_and_distill_enqueues_settled_threads_once(api, engine, monkeypatch):
+    from datetime import datetime, timedelta, timezone
     from argus.db import session_factory
-    from argus.domain.models import Actor, MergeRequest, Note, Repository
+    from argus.domain.models import (Discussion, DistillThread, MergeRequest, Note,
+                                         Repository)
     from argus.ingest.reconciler import ReconcileResult
 
     sf = session_factory(engine)
@@ -549,21 +550,24 @@ async def test_reconcile_and_distill_enqueues_one_batched_run(api, engine, monke
         repo = Repository(provider="gitlab", project_path="grp/reconcile-test",
                           gitlab_project_id=90000401)
         s.add(repo); await s.flush()
-        mr = MergeRequest(repo_id=repo.id, mr_iid=7, title="t", state="opened",
+        mr = MergeRequest(repo_id=repo.id, mr_iid=7, title="t", state="merged",
                           source_branch="a", target_branch="b", head_sha="s", web_url="u")
         s.add(mr); await s.flush()
-        bot = Actor(username="argus-bot", provider_user_id=1)
-        s.add(bot); await s.flush()
-        note = Note(mr_id=mr.id, author_id=bot.id, author_type="bot", kind="inline",
+        disc = Discussion(mr_id=mr.id, provider_discussion_id="rd1", resolved=True)
+        s.add(disc); await s.flush()
+        now = datetime.now(timezone.utc)
+        note = Note(mr_id=mr.id, discussion_id=disc.id, author_type="bot", kind="inline",
                    body="consider renaming this", file_path="a.py", line=1,
-                   disposition="open", provider_note_id=555,
-                   note_created_at=datetime.now(timezone.utc))
-        s.add(note); await s.flush()
+                   disposition="open", provider_note_id=555, note_created_at=now)
+        reply = Note(mr_id=mr.id, discussion_id=disc.id, author_type="human", kind="inline",
+                     body="name is from the SDK", file_path="a.py", line=1,
+                     provider_note_id=556, note_created_at=now + timedelta(minutes=1))
+        s.add_all([note, reply]); await s.flush()
         await s.commit()
         mr_id, repo_id, note_id = mr.id, repo.id, note.id
 
     async def fake_reconcile(session, client, repo, mr_row, settings):
-        return ReconcileResult(note_ids=[note_id])
+        return ReconcileResult(changed_note_ids=[note_id])
 
     from argus.api import app as app_module
     monkeypatch.setattr(app_module, "reconcile_mr", fake_reconcile)
@@ -571,18 +575,19 @@ async def test_reconcile_and_distill_enqueues_one_batched_run(api, engine, monke
     try:
         r = await api.post(f"/merge-requests/{mr_id}/reconcile-and-distill", json={})
         assert r.status_code == 202, r.text
-        assert r.json() == {"queued_run": True, "note_count": 1}
+        assert r.json() == {"queued_runs": 1, "changed_dispositions": 1}
 
-        # second call: identical note-id batch -> same dedup_key -> not queued again
+        # second call: the thread is already queued at the same content -> nothing new
         r2 = await api.post(f"/merge-requests/{mr_id}/reconcile-and-distill", json={})
         assert r2.status_code == 202
-        assert r2.json() == {"queued_run": False, "note_count": 1}
+        assert r2.json() == {"queued_runs": 0, "changed_dispositions": 1}
     finally:
         async with engine.begin() as conn:
-            from argus.domain.models import Job, Note as NoteModel
+            from argus.domain.models import Job
             await conn.execute(delete(Job).where(Job.kind == "distill_mr"))
-            await conn.execute(delete(NoteModel).where(NoteModel.mr_id == mr_id))
-            await conn.execute(delete(Actor).where(Actor.id == bot.id))
+            await conn.execute(delete(DistillThread).where(DistillThread.mr_id == mr_id))
+            await conn.execute(delete(Note).where(Note.mr_id == mr_id))
+            await conn.execute(delete(Discussion).where(Discussion.mr_id == mr_id))
             await conn.execute(delete(MergeRequest).where(MergeRequest.id == mr_id))
             await conn.execute(delete(Repository).where(Repository.id == repo_id))
 
@@ -590,6 +595,143 @@ async def test_reconcile_and_distill_enqueues_one_batched_run(api, engine, monke
 async def test_get_distillation_run_returns_404_for_unknown_id(api):
     resp = await api.get(f"/distillation-runs/{uuid.uuid4()}")
     assert resp.status_code == 404
+
+
+async def test_get_distillation_run_lists_its_thread_decisions(api, engine):
+    from datetime import datetime, timezone
+    from argus.db import session_factory
+    from argus.domain.models import (Discussion, DistillationRun, DistillThread,
+                                         MergeRequest, Note, Repository)
+    sf = session_factory(engine)
+    async with sf() as s:
+        repo = Repository(provider="gitlab", project_path=f"grp/dt-api-{uuid.uuid4().hex[:6]}",
+                          gitlab_project_id=int(uuid.uuid4().int % 10**8))
+        s.add(repo); await s.flush()
+        mr = MergeRequest(repo_id=repo.id, mr_iid=1, title="t", state="merged",
+                          source_branch="a", target_branch="b", head_sha="s", web_url="u")
+        s.add(mr); await s.flush()
+        disc = Discussion(mr_id=mr.id, provider_discussion_id="dta1")
+        s.add(disc); await s.flush()
+        s.add(Note(mr_id=mr.id, discussion_id=disc.id, author_type="bot", kind="inline",
+                   body="b", provider_note_id=881, disposition="replied_unclassified",
+                   note_created_at=datetime.now(timezone.utc)))
+        run = DistillationRun(mr_id=mr.id, note_ids=[], status="done")
+        s.add(run); await s.flush()
+        s.add(DistillThread(mr_id=mr.id, discussion_id=disc.id, thread_type="bot_thread",
+                            content_hash="h", status="done", distillation_run_id=run.id,
+                            reply_verdict="rejected", verdict_reason="SDK sets it",
+                            learning_ids=[], decision_reason="nothing reusable"))
+        await s.commit()
+        run_id, mr_id, repo_id = run.id, mr.id, repo.id
+    try:
+        r = await api.get(f"/distillation-runs/{run_id}")
+        assert r.status_code == 200, r.text
+        [t] = r.json()["threads"]
+        assert (t["reply_verdict"], t["reconciler_label"], t["thread_type"]) == \
+            ("rejected", "replied_unclassified", "bot_thread")
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(delete(DistillThread).where(DistillThread.mr_id == mr_id))
+            await conn.execute(delete(DistillationRun).where(DistillationRun.mr_id == mr_id))
+            await conn.execute(delete(Note).where(Note.mr_id == mr_id))
+            await conn.execute(delete(Discussion).where(Discussion.mr_id == mr_id))
+            await conn.execute(delete(MergeRequest).where(MergeRequest.id == mr_id))
+            await conn.execute(delete(Repository).where(Repository.id == repo_id))
+
+
+async def _seed_thread_mr(engine, with_run=False):
+    from datetime import datetime, timedelta, timezone
+    from argus.db import session_factory
+    from argus.domain.models import (Discussion, DistillationRun, DistillThread,
+                                         MergeRequest, Note, Repository)
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    sf = session_factory(engine)
+    async with sf() as s:
+        repo = Repository(provider="gitlab", project_path=f"grp/thr-api-{uuid.uuid4().hex[:6]}",
+                          gitlab_project_id=int(uuid.uuid4().int % 10**8))
+        s.add(repo); await s.flush()
+        mr = MergeRequest(repo_id=repo.id, mr_iid=1, title="t", state="opened",
+                          source_branch="a", target_branch="b", head_sha="s",
+                          web_url="http://gl/mr/1")
+        s.add(mr); await s.flush()
+        disc = Discussion(mr_id=mr.id, provider_discussion_id="thr1", resolved=True)
+        sys_only = Discussion(mr_id=mr.id, provider_discussion_id="thr-sys")
+        s.add_all([disc, sys_only]); await s.flush()
+
+        def note(d, author, kind, body, minutes, pid, etype=None):
+            return Note(mr_id=mr.id, discussion_id=d.id, author_type=author, kind=kind, body=body,
+                        provider_note_id=pid, system_event_type=etype,
+                        file_path="a.py" if kind == "inline" else None,
+                        line=7 if kind == "inline" else None,
+                        note_created_at=base + timedelta(minutes=minutes))
+        s.add_all([
+            note(disc, "bot", "inline", "use a context manager", 0, 501),
+            note(disc, "human", "inline", "closed in finally", 5, 502),
+            note(disc, "system", "system", "changed this line in version 8 of the diff", 10, 503,
+                 "line_outdated"),
+            note(sys_only, "system", "system", "assigned to @x", 3, 504, "assignee"),
+            Note(mr_id=mr.id, discussion_id=None, author_type="system", kind="system",
+                 body="added 1 commit\n<ul><li>e2656a48 - Fix it</li></ul>", provider_note_id=505,
+                 system_event_type="commits_added", note_created_at=base + timedelta(minutes=12)),
+        ])
+        run_id = None
+        if with_run:
+            run = DistillationRun(mr_id=mr.id, note_ids=[], status="done")
+            s.add(run); await s.flush()
+            s.add(DistillThread(mr_id=mr.id, discussion_id=disc.id, thread_type="bot_thread",
+                                content_hash="h", status="done", distillation_run_id=run.id,
+                                reply_verdict="rejected", verdict_reason="author disagreed"))
+            run_id = run.id
+        await s.commit()
+        return mr.id, repo.id, disc.id, run_id
+
+
+async def _purge_thread_mr(engine, mr_id, repo_id):
+    from argus.domain.models import (Discussion, DistillationRun, DistillThread,
+                                         MergeRequest, Note, Repository)
+    async with engine.begin() as conn:
+        await conn.execute(delete(DistillThread).where(DistillThread.mr_id == mr_id))
+        await conn.execute(delete(DistillationRun).where(DistillationRun.mr_id == mr_id))
+        await conn.execute(delete(Note).where(Note.mr_id == mr_id))
+        await conn.execute(delete(Discussion).where(Discussion.mr_id == mr_id))
+        await conn.execute(delete(MergeRequest).where(MergeRequest.id == mr_id))
+        await conn.execute(delete(Repository).where(Repository.id == repo_id))
+
+
+async def test_mr_detail_threads_group_notes_and_hide_system_notes(api, engine):
+    mr_id, repo_id, disc_id, _ = await _seed_thread_mr(engine)
+    try:
+        r = await api.get(f"/merge-requests/{mr_id}")
+        assert r.status_code == 200, r.text
+        [t] = r.json()["threads"]
+        assert t["discussion_id"] == str(disc_id)
+        assert (t["resolved"], t["has_bot_comment"], t["anchor"]) == (True, True, "a.py:7")
+        assert [(n["author_type"], n["depth"]) for n in t["notes"]] == [("bot", 0), ("human", 1)]
+        assert all(n["kind"] != "system" for n in t["notes"])
+        assert t["notes"][0]["disposition"] == "open" and t["notes"][1]["disposition"] is None
+        assert t["disposition"] == "open"
+        assert t["gitlab_url"] == "http://gl/mr/1#note_501"
+        assert [(e["kind"], e["text"]) for e in t["events"]] == [
+            ("line_changed", "the commented line changed (version 8 of the diff)"),
+            ("commit", "e2656a48 - Fix it")]
+        assert t["verdict"] is None
+    finally:
+        await _purge_thread_mr(engine, mr_id, repo_id)
+
+
+async def test_distillation_run_threads_carry_the_thread_view(api, engine):
+    mr_id, repo_id, disc_id, run_id = await _seed_thread_mr(engine, with_run=True)
+    try:
+        r = await api.get(f"/distillation-runs/{run_id}")
+        assert r.status_code == 200, r.text
+        [row] = r.json()["threads"]
+        t = row["thread"]
+        assert t["discussion_id"] == str(disc_id)
+        assert (t["verdict"], t["verdict_reason"]) == ("rejected", "author disagreed")
+        assert [n["depth"] for n in t["notes"]] == [0, 1]
+        assert [e["kind"] for e in t["events"]] == ["line_changed", "commit"]
+    finally:
+        await _purge_thread_mr(engine, mr_id, repo_id)
 
 
 async def test_get_distillation_run_trace_returns_empty_lists_for_unknown_run(api):
@@ -600,12 +742,13 @@ async def test_get_distillation_run_trace_returns_empty_lists_for_unknown_run(ap
 
 
 async def test_run_distill_mr_job_aggregates_llm_round_tokens(engine, settings, monkeypatch):
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
 
     from argus.api.app import _run_distill_mr_job
     from argus.db import session_factory
-    from argus.domain.models import (Actor, DistillationRun, LLMEndpoint,
-                                         LLMRound, MergeRequest, Note, Repository)
+    from argus.domain.models import (Actor, Discussion, DistillationRun, DistillThread,
+                                         LLMEndpoint, LLMRound, MergeRequest, Note,
+                                         Repository)
 
     sf = session_factory(engine)
     async with sf() as s:
@@ -615,33 +758,38 @@ async def test_run_distill_mr_job_aggregates_llm_round_tokens(engine, settings, 
         mr = MergeRequest(repo_id=repo.id, mr_iid=8, title="t", state="opened",
                           source_branch="a", target_branch="b", head_sha="s", web_url="u")
         s.add(mr); await s.flush()
+        disc = Discussion(mr_id=mr.id, provider_discussion_id="jd-"+uuid.uuid4().hex[:6])
+        s.add(disc); await s.flush()
         bot = Actor(username="argus-bot-agg", provider_user_id=2)
         s.add(bot); await s.flush()
         note = Note(mr_id=mr.id, author_id=bot.id, author_type="bot", kind="inline",
                    body="consider renaming this", file_path="a.py", line=1,
                    disposition="open", provider_note_id=556,
-                   note_created_at=datetime.now(timezone.utc))
+                   discussion_id=disc.id, note_created_at=datetime.now(timezone.utc))
         s.add(note); await s.flush()
+        s.add(Note(mr_id=mr.id, discussion_id=disc.id, author_type="human", kind="inline",
+                   body="renamed", provider_note_id=596,
+                   note_created_at=datetime.now(timezone.utc) + timedelta(minutes=1)))
+        await s.flush()
         ep = LLMEndpoint(name="distill-agg-ep", provider="anthropic", model="m",
                          base_url="http://x", is_default=True)
         s.add(ep); await s.flush()
         await s.commit()
         mr_id, repo_id, note_id, bot_id, ep_id = mr.id, repo.id, note.id, bot.id, ep.id
 
-    async def fake_run_agentic_distillation_for_mr(
-            sf, settings, gitlab, repo, mr, notes, llm_cfg, max_rounds=10,
-            distillation_run_id=None):
+    async def fake_run_thread_distillation(
+            sf, settings, gitlab, repo, mr, threads, llm_cfg, *, distillation_run_id=None):
         async with sf() as s:
             s.add(LLMRound(distillation_run_id=distillation_run_id, stage_name="distill",
                            seq=1, prompt_tokens=100, completion_tokens=40))
             s.add(LLMRound(distillation_run_id=distillation_run_id, stage_name="distill",
                            seq=2, prompt_tokens=25, completion_tokens=10))
             await s.commit()
-        return None
+        return {}, []
 
     import argus.knowledge.agentic_distiller as distiller_module
-    monkeypatch.setattr(distiller_module, "run_agentic_distillation_for_mr",
-                       fake_run_agentic_distillation_for_mr)
+    monkeypatch.setattr(distiller_module, "run_thread_distillation",
+                       fake_run_thread_distillation)
 
     class FakeGitLabClient:
         async def aclose(self):
@@ -664,8 +812,87 @@ async def test_run_distill_mr_job_aggregates_llm_round_tokens(engine, settings, 
             run_ids = select(DistillationRun.id).where(DistillationRun.mr_id == mr_id)
             await conn.execute(delete(LLMRound).where(
                 LLMRound.distillation_run_id.in_(run_ids)))
+            await conn.execute(delete(DistillThread).where(DistillThread.mr_id == mr_id))
             await conn.execute(delete(DistillationRun).where(DistillationRun.mr_id == mr_id))
             await conn.execute(delete(Note).where(Note.mr_id == mr_id))
+            await conn.execute(delete(Discussion).where(Discussion.mr_id == mr_id))
+            await conn.execute(delete(Actor).where(Actor.id == bot_id))
+            await conn.execute(delete(MergeRequest).where(MergeRequest.id == mr_id))
+            await conn.execute(delete(Repository).where(Repository.id == repo_id))
+            await conn.execute(delete(LLMEndpoint).where(LLMEndpoint.id == ep_id))
+
+
+async def test_run_distill_mr_job_sets_an_llm_request_timeout(
+        engine, settings, monkeypatch):
+    """A hung connection to the LLM endpoint must not block forever: unlike
+    execute_review_job, this path never set llm_cfg.timeout, and on
+    2026-09-21 one stuck distill_mr call froze the whole backend's event
+    loop for 8+ hours with the GPU itself sitting idle and healthy the
+    entire time. num_retries on LLMConfig turns a timeout here into a
+    retry, not a hang."""
+    from datetime import datetime, timedelta, timezone
+
+    from argus.api.app import _run_distill_mr_job
+    from argus.db import session_factory
+    from argus.domain.models import (Actor, Discussion, DistillThread, LLMEndpoint,
+                                         MergeRequest, Note, Repository)
+
+    sf = session_factory(engine)
+    async with sf() as s:
+        repo = Repository(provider="gitlab", project_path="grp/distill-timeout-test",
+                          gitlab_project_id=90000502)
+        s.add(repo); await s.flush()
+        mr = MergeRequest(repo_id=repo.id, mr_iid=9, title="t", state="opened",
+                          source_branch="a", target_branch="b", head_sha="s", web_url="u")
+        s.add(mr); await s.flush()
+        disc = Discussion(mr_id=mr.id, provider_discussion_id="jd-"+uuid.uuid4().hex[:6])
+        s.add(disc); await s.flush()
+        bot = Actor(username="argus-bot-timeout", provider_user_id=3)
+        s.add(bot); await s.flush()
+        note = Note(mr_id=mr.id, author_id=bot.id, author_type="bot", kind="inline",
+                   body="consider renaming this", file_path="a.py", line=1,
+                   disposition="open", provider_note_id=557,
+                   discussion_id=disc.id, note_created_at=datetime.now(timezone.utc))
+        s.add(note); await s.flush()
+        s.add(Note(mr_id=mr.id, discussion_id=disc.id, author_type="human", kind="inline",
+                   body="renamed", provider_note_id=597,
+                   note_created_at=datetime.now(timezone.utc) + timedelta(minutes=1)))
+        await s.flush()
+        ep = LLMEndpoint(name="distill-timeout-ep", provider="anthropic", model="m",
+                         base_url="http://x", is_default=True)
+        s.add(ep); await s.flush()
+        await s.commit()
+        mr_id, repo_id, note_id, bot_id, ep_id = mr.id, repo.id, note.id, bot.id, ep.id
+
+    captured = {}
+
+    async def fake_run_thread_distillation(
+            sf, settings, gitlab, repo, mr, threads, llm_cfg, *, distillation_run_id=None):
+        captured["timeout"] = llm_cfg.timeout
+        return {}, []
+
+    import argus.knowledge.agentic_distiller as distiller_module
+    monkeypatch.setattr(distiller_module, "run_thread_distillation",
+                       fake_run_thread_distillation)
+
+    class FakeGitLabClient:
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr("argus.gitlab.client.GitLabClient",
+                       lambda *a, **k: FakeGitLabClient())
+
+    try:
+        await _run_distill_mr_job(sf, settings, {"mr_id": str(mr_id), "note_ids": [str(note_id)]})
+        assert captured["timeout"] == settings.review_llm_timeout_s
+        assert captured["timeout"] is not None
+    finally:
+        async with engine.begin() as conn:
+            from argus.domain.models import DistillationRun
+            await conn.execute(delete(DistillThread).where(DistillThread.mr_id == mr_id))
+            await conn.execute(delete(DistillationRun).where(DistillationRun.mr_id == mr_id))
+            await conn.execute(delete(Note).where(Note.mr_id == mr_id))
+            await conn.execute(delete(Discussion).where(Discussion.mr_id == mr_id))
             await conn.execute(delete(Actor).where(Actor.id == bot_id))
             await conn.execute(delete(MergeRequest).where(MergeRequest.id == mr_id))
             await conn.execute(delete(Repository).where(Repository.id == repo_id))
@@ -696,9 +923,12 @@ async def test_learnings_endpoint_exposes_strength(api, engine):
             await conn.execute(delete(Learning).where(Learning.id == learning_id))
 
 
-async def test_approve_verdict_archives_learning(api, engine):
+async def test_approve_verdict_archives_learning(api, engine, settings):
     from argus.db import session_factory
 
+    admin_app = create_app(settings=settings.model_copy(update={"admin_token": "audit-admin"}),
+                           engine=engine)
+    admin_transport = httpx.ASGITransport(app=admin_app)
     sf = session_factory(engine)
     async with sf() as session:
         repo = Repository(provider="gitlab", project_path="grp/audit-approve",
@@ -720,7 +950,9 @@ async def test_approve_verdict_archives_learning(api, engine):
         repo_id = repo.id
 
     try:
-        r = await api.post(f"/audit-verdicts/{verdict_id}/approve")
+        async with httpx.AsyncClient(transport=admin_transport, base_url="http://t") as admin_api:
+            r = await admin_api.post(f"/audit-verdicts/{verdict_id}/approve",
+                                     headers={"Authorization": "Bearer audit-admin"})
         assert r.status_code == 200, r.text
 
         async with sf() as session:
@@ -734,9 +966,12 @@ async def test_approve_verdict_archives_learning(api, engine):
             await conn.execute(delete(Repository).where(Repository.id == repo_id))
 
 
-async def test_reject_verdict_leaves_learning_active(api, engine):
+async def test_reject_verdict_leaves_learning_active(api, engine, settings):
     from argus.db import session_factory
 
+    admin_app = create_app(settings=settings.model_copy(update={"admin_token": "audit-admin"}),
+                           engine=engine)
+    admin_transport = httpx.ASGITransport(app=admin_app)
     sf = session_factory(engine)
     async with sf() as session:
         repo = Repository(provider="gitlab", project_path="grp/audit-reject",
@@ -758,7 +993,9 @@ async def test_reject_verdict_leaves_learning_active(api, engine):
         repo_id = repo.id
 
     try:
-        r = await api.post(f"/audit-verdicts/{verdict_id}/reject")
+        async with httpx.AsyncClient(transport=admin_transport, base_url="http://t") as admin_api:
+            r = await admin_api.post(f"/audit-verdicts/{verdict_id}/reject",
+                                     headers={"Authorization": "Bearer audit-admin"})
         assert r.status_code == 200, r.text
 
         async with sf() as session:

@@ -9,7 +9,7 @@ An outline answers "what is in this file, and at which line" for a few hundred
 tokens instead of several thousand, and a search answers "where is this
 defined" without reading anything.
 
-Deliberately dependency-free: Python files are parsed with the stdlib `ast`
+Python files are parsed with the stdlib `ast`
 (exact), everything else with the same regex approach the graphify module
 already uses for diff headers, and search shells out to ripgrep only when it
 is present, falling back to a pure-Python walk. The runtime image today has
@@ -22,7 +22,10 @@ import fnmatch
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
+
+import regex
 
 # Directories that are never worth searching or outlining. Walking .git on a
 # large repo costs seconds and returns nothing a reviewer wants.
@@ -153,10 +156,20 @@ def iter_source_files(workspace: Path):
         yield p
 
 
+class SearchTimedOut(Exception):
+    """ripgrep hit SEARCH_TIMEOUT_S: a timeout, which must not read as "no matches"."""
+
+
+def _timed_out_message() -> list[str]:
+    return [f"search timed out after {SEARCH_TIMEOUT_S}s; narrow the pattern or add a glob"]
+
+
 def _search_ripgrep(workspace: Path, pattern: str, glob: str,
                     context: int, max_matches: int) -> list[str] | None:
     """Use ripgrep when the image has it. Returns None when it is absent or
-    fails, so the caller falls back rather than surfacing an error."""
+    fails, so the caller falls back rather than surfacing an error. Raises
+    SearchTimedOut on a timeout: falling back with the deadline already spent
+    would return nothing and tell the agent the pattern does not exist."""
     rg = shutil.which("rg")
     if rg is None:
         return None
@@ -170,7 +183,9 @@ def _search_ripgrep(workspace: Path, pattern: str, glob: str,
     try:
         proc = subprocess.run(cmd, cwd=workspace, capture_output=True,
                               text=True, timeout=SEARCH_TIMEOUT_S)
-    except (subprocess.TimeoutExpired, OSError):
+    except subprocess.TimeoutExpired:
+        raise SearchTimedOut
+    except OSError:
         return None
     if proc.returncode not in (0, 1):     # 1 == no matches, which is a result
         return None
@@ -178,12 +193,19 @@ def _search_ripgrep(workspace: Path, pattern: str, glob: str,
 
 
 def _search_python(workspace: Path, pattern: str, glob: str,
-                   context: int, max_matches: int) -> list[str]:
+                   context: int, max_matches: int,
+                   deadline: float | None = None) -> list[str]:
     """Pure-Python fallback. Slower than ripgrep but always available, and the
     worktrees involved are single repositories rather than a whole disk."""
-    rx = re.compile(pattern)
+    rx = regex.compile(pattern, regex.VERSION0)
+    if deadline is None:
+        deadline = time.monotonic() + SEARCH_TIMEOUT_S
     out: list[str] = []
     for p in iter_source_files(workspace):
+        if deadline is not None and time.monotonic() > deadline:
+            out.append(f"[search stopped after {SEARCH_TIMEOUT_S}s; results are partial, "
+                       "narrow the pattern or add a glob]")
+            break
         rel = _rel(p, workspace)
         # Path.match() only matches a fixed number of trailing path segments
         # and treats "**" as a literal single-segment wildcard, so recursive
@@ -199,7 +221,18 @@ def _search_python(workspace: Path, pattern: str, glob: str,
         except OSError:
             continue
         for i, line in enumerate(lines):
-            if not rx.search(line):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return out + [f"[search stopped after {SEARCH_TIMEOUT_S}s; results are partial, "
+                              "narrow the pattern or add a glob]"]
+            if len(line) > 10000:
+                line = line[:10000]
+            try:
+                matched = rx.search(line, timeout=remaining)
+            except TimeoutError:
+                return out + [f"[search stopped after {SEARCH_TIMEOUT_S}s; results are partial, "
+                              "narrow the pattern or add a glob]"]
+            if not matched:
                 continue
             lo = max(0, i - context)
             hi = min(len(lines), i + context + 1)
@@ -214,9 +247,20 @@ def _search_python(workspace: Path, pattern: str, glob: str,
 async def search(workspace: Path, pattern: str, glob: str = "",
                  context: int = 2, max_matches: int = 50) -> list[str]:
     """Search the worktree, preferring ripgrep and degrading to Python."""
+    deadline = time.monotonic() + SEARCH_TIMEOUT_S
+
     def _sync() -> list[str]:
-        hits = _search_ripgrep(workspace, pattern, glob, context, max_matches)
+        try:
+            hits = _search_ripgrep(workspace, pattern, glob, context, max_matches)
+        except SearchTimedOut:
+            return _timed_out_message()
         if hits is None:
-            hits = _search_python(workspace, pattern, glob, context, max_matches)
+            hits = _search_python(workspace, pattern, glob, context, max_matches,
+                                  deadline=deadline)
         return hits
-    return await asyncio.to_thread(_sync)
+    try:
+        # outer bound above ripgrep's own timeout; the review gets control back even if the thread is stuck
+        return await asyncio.wait_for(asyncio.to_thread(_sync),
+                                      timeout=SEARCH_TIMEOUT_S * 1.5)
+    except TimeoutError:
+        return _timed_out_message()

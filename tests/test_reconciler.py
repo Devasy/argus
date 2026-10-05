@@ -1,7 +1,10 @@
+import uuid
 from datetime import datetime, timedelta, timezone
 
-from argus.domain.models import (Actor, Discussion, Learning,
-                                     MergeRequest, Note, Repository)
+import pytest
+
+from argus.domain.models import (Discussion, DistillThread, MergeRequest, Note,
+                                     Repository)
 from argus.ingest.reconciler import (ReconcileResult,
                                          classify_suggestion_disposition,
                                          reconcile_mr)
@@ -63,39 +66,9 @@ class FakeClient:
         return []
 
 
-async def test_reconcile_mr_candidate_includes_repo_id(db):
-    repo = Repository(provider="gitlab", project_path="g/reconciler-p",
-                      gitlab_project_id=9001)
-    db.add(repo)
-    await db.flush()
-    mr = MergeRequest(repo_id=repo.id, mr_iid=1, title="t", state="opened",
-                      source_branch="s", target_branch="m", head_sha="abc",
-                      web_url="http://x")
-    db.add(mr)
-    await db.flush()
-    disc = Discussion(mr_id=mr.id, provider_discussion_id="d1",
-                      resolvable=True, resolved=True)
-    db.add(disc)
-    await db.flush()
-    now = datetime.now(timezone.utc)
-    bot_note = Note(mr_id=mr.id, discussion_id=disc.id, provider_note_id=1,
-                    author_type="bot", kind="inline", body="wrap in <log_data>",
-                    file_path="x/tools.py", note_created_at=now)
-    db.add(bot_note)
-    await db.flush()
-    reply = Note(mr_id=mr.id, discussion_id=disc.id, provider_note_id=2,
-                author_type="human", kind="inline", body="already wrapped",
-                note_created_at=now + timedelta(minutes=1))
-    db.add(reply)
-    await db.flush()
-
-    result = await reconcile_mr(db, FakeClient(), repo, mr, None)
-    assert bot_note.id in result.note_ids
-
-
-async def test_reconcile_mr_batches_all_resolved_notes_for_the_mr(db):
-    repo = Repository(provider="gitlab", project_path="g/batch-p",
-                      gitlab_project_id=9101)
+async def test_reconcile_mr_reports_only_changed_bot_dispositions(db):
+    repo = Repository(provider="gitlab", project_path=f"g/chg-{uuid.uuid4().hex[:6]}",
+                      gitlab_project_id=int(uuid.uuid4().int % 10**8))
     db.add(repo)
     await db.flush()
     mr = MergeRequest(repo_id=repo.id, mr_iid=2, title="t", state="opened",
@@ -103,82 +76,183 @@ async def test_reconcile_mr_batches_all_resolved_notes_for_the_mr(db):
                       web_url="http://x")
     db.add(mr)
     await db.flush()
-    disc1 = Discussion(mr_id=mr.id, provider_discussion_id="d1",
-                       resolvable=True, resolved=True)
-    disc2 = Discussion(mr_id=mr.id, provider_discussion_id="d2",
-                       resolvable=True, resolved=True)
-    db.add_all([disc1, disc2])
+    changed = Discussion(mr_id=mr.id, provider_discussion_id="d1",
+                         resolvable=True, resolved=True)
+    same = Discussion(mr_id=mr.id, provider_discussion_id="d2",
+                      resolvable=True, resolved=False)
+    silent = Discussion(mr_id=mr.id, provider_discussion_id="d3",
+                        resolvable=True, resolved=False)
+    db.add_all([changed, same, silent])
     await db.flush()
     now = datetime.now(timezone.utc)
-    note1 = Note(mr_id=mr.id, discussion_id=disc1.id, provider_note_id=1,
-                author_type="bot", kind="inline", body="suggestion A",
-                disposition="open", note_created_at=now)
-    note2 = Note(mr_id=mr.id, discussion_id=disc2.id, provider_note_id=2,
-                author_type="bot", kind="inline", body="suggestion B",
-                disposition="open", note_created_at=now)
-    db.add_all([note1, note2])
+    flips = Note(mr_id=mr.id, discussion_id=changed.id, provider_note_id=1,
+                 author_type="bot", kind="inline", body="suggestion A",
+                 disposition="open", note_created_at=now)
+    stays = Note(mr_id=mr.id, discussion_id=same.id, provider_note_id=2,
+                 author_type="bot", kind="inline", body="suggestion B",
+                 disposition="open", note_created_at=now)
+    human = Note(mr_id=mr.id, discussion_id=silent.id, provider_note_id=3,
+                 author_type="human", kind="inline", body="should be immutable",
+                 disposition="open", note_created_at=now)
+    db.add_all([flips, stays, human])
     await db.flush()
 
     result = await reconcile_mr(db, FakeClient(), repo, mr, None)
     assert isinstance(result, ReconcileResult)
-    assert len(result.note_ids) == 2
+    assert result.changed_note_ids == [flips.id]
 
 
-async def test_reconcile_mr_detects_bot_silent_human_discussion(db):
-    repo = Repository(provider="gitlab", project_path="g/silent-p",
-                      gitlab_project_id=9102)
+async def _bot_thread_with_reply(db, reply_body, suggestion_applied=False):
+    repo = Repository(provider="gitlab", project_path=f"g/rc-{uuid.uuid4().hex[:6]}",
+                      gitlab_project_id=int(uuid.uuid4().int % 10**8))
     db.add(repo)
     await db.flush()
-    mr = MergeRequest(repo_id=repo.id, mr_iid=3, title="t", state="opened",
-                      source_branch="s", target_branch="m", head_sha="abc",
-                      web_url="http://x")
+    mr = MergeRequest(repo_id=repo.id, mr_iid=1, title="t", state="opened",
+                      source_branch="s", target_branch="m", head_sha="abc", web_url="http://x")
     db.add(mr)
     await db.flush()
-    disc = Discussion(mr_id=mr.id, provider_discussion_id="d3",
-                      resolvable=True, resolved=False)
+    disc = Discussion(mr_id=mr.id, provider_discussion_id=uuid.uuid4().hex,
+                      resolvable=True, resolved=True)
     db.add(disc)
     await db.flush()
-    human = Actor(username="bob", provider_user_id=5, provider="gitlab")
-    db.add(human)
+    now = datetime.now(timezone.utc)
+    bot = Note(mr_id=mr.id, discussion_id=disc.id, provider_note_id=1, author_type="bot",
+               kind="inline", body="add a timeout", note_created_at=now,
+               suggestions=[{"applied": True}] if suggestion_applied else None)
+    reply = Note(mr_id=mr.id, discussion_id=disc.id, provider_note_id=2, author_type="human",
+                 kind="inline", body=reply_body, note_created_at=now + timedelta(minutes=1))
+    db.add_all([bot, reply])
     await db.flush()
-    human_note = Note(mr_id=mr.id, discussion_id=disc.id, provider_note_id=3,
-                      author_id=human.id, author_type="human", kind="inline",
-                      body="This mutates shared state, should be immutable",
-                      disposition="open", note_created_at=datetime.now(timezone.utc))
-    db.add(human_note)
+    return repo, mr, disc, bot, reply
+
+
+async def _verdict(db, mr, disc, human_ids, verdict, hash_override=None):
+    from argus.knowledge.distill_threads import content_hash
+    db.add(DistillThread(mr_id=mr.id, discussion_id=disc.id, thread_type="bot_thread",
+                         content_hash=hash_override or content_hash(human_ids),
+                         status="done", reply_verdict=verdict))
+    await db.flush()
+
+
+async def test_an_agent_verdict_replaces_replied_unclassified(db):
+    repo, mr, disc, bot, reply = await _bot_thread_with_reply(db, "see helper/http.py")
+    await _verdict(db, mr, disc, [reply.id], "rejected")
+    await reconcile_mr(db, FakeClient(), repo, mr, None)
+    assert bot.disposition == "rejected_with_rationale"
+
+
+async def test_an_agent_verdict_overrides_a_keyword_guess(db):
+    repo, mr, disc, bot, reply = await _bot_thread_with_reply(db, "fixed?")
+    await _verdict(db, mr, disc, [reply.id], "rejected")
+    await reconcile_mr(db, FakeClient(), repo, mr, None)
+    assert bot.disposition == "rejected_with_rationale"
+
+
+async def test_an_applied_suggestion_is_never_overridden(db):
+    repo, mr, disc, bot, reply = await _bot_thread_with_reply(db, "meh", suggestion_applied=True)
+    await _verdict(db, mr, disc, [reply.id], "rejected")
+    await reconcile_mr(db, FakeClient(), repo, mr, None)
+    assert bot.disposition == "accepted"
+
+
+async def test_an_unclear_verdict_changes_nothing(db):
+    repo, mr, disc, bot, reply = await _bot_thread_with_reply(db, "this is intentional")
+    await _verdict(db, mr, disc, [reply.id], "unclear")
+    await reconcile_mr(db, FakeClient(), repo, mr, None)
+    assert bot.disposition == "rejected_with_rationale"
+
+
+@pytest.mark.parametrize("verdict", ["question", "acknowledged"])
+async def test_a_question_or_deferral_is_not_counted_as_a_rejection(db, verdict):
+    # "not needed?" trips the rejection keywords, but a question is no verdict on the bot
+    repo, mr, disc, bot, reply = await _bot_thread_with_reply(db, "not needed here?")
+    await _verdict(db, mr, disc, [reply.id], verdict)
+    await reconcile_mr(db, FakeClient(), repo, mr, None)
+    assert bot.disposition == "replied_unclassified"
+
+
+async def test_a_stale_verdict_is_ignored_after_a_new_reply(db):
+    repo, mr, disc, bot, reply = await _bot_thread_with_reply(db, "see helper/http.py")
+    await _verdict(db, mr, disc, [reply.id], "rejected", hash_override="old-hash")
+    await reconcile_mr(db, FakeClient(), repo, mr, None)
+    assert bot.disposition == "replied_unclassified"
+
+
+def test_a_verified_followup_counts_as_accepted_but_ranks_below_humans():
+    assert classify_suggestion_disposition([], "", False, [], followup_verified=True) == "accepted_by_followup"
+    assert classify_suggestion_disposition([], "", True, [], followup_verified=True) == "accepted_by_followup"
+    assert classify_suggestion_disposition(
+        [], "", True, ["this is intentional"], followup_verified=True) == "rejected_with_rationale"
+    assert classify_suggestion_disposition([], "", True, ["Fixed"], followup_verified=True) == "accepted_manually"
+    assert classify_suggestion_disposition([], "", False, []) == "open"
+
+
+async def test_bot_resolves_count_only_when_the_followup_verified_a_fix(db):
+    from argus.domain.models import Actor, Feedback
+    repo = Repository(provider="gitlab", project_path="g/bot-resolved", gitlab_project_id=9301)
+    db.add(repo)
+    await db.flush()
+    mr = MergeRequest(repo_id=repo.id, mr_iid=1, title="t", state="opened", source_branch="s",
+                      target_branch="m", head_sha="abc", web_url="http://x")
+    bot = Actor(provider_user_id=93010, username="argus")
+    human = Actor(provider_user_id=93011, username="dev")
+    db.add_all([mr, bot, human])
+    await db.flush()
+    now = datetime.now(timezone.utc)
+
+    async def thread(key, resolved_by, verdict=None, reply=None):
+        disc = Discussion(mr_id=mr.id, provider_discussion_id=key, resolvable=True,
+                          resolved=resolved_by is not None,
+                          resolved_by_id=resolved_by.id if resolved_by else None)
+        db.add(disc)
+        await db.flush()
+        note = Note(mr_id=mr.id, discussion_id=disc.id, provider_note_id=abs(hash(key)) % 10**8,
+                    author_id=bot.id, author_type="bot", kind="inline", body="x",
+                    file_path="a.py", note_created_at=now)
+        db.add(note)
+        await db.flush()
+        if verdict:
+            db.add(Feedback(note_id=note.id, kind="followup", payload={"verdict": verdict}))
+        if reply:
+            db.add(Note(mr_id=mr.id, discussion_id=disc.id, provider_note_id=abs(hash(key + "r")) % 10**8,
+                        author_id=human.id, author_type="human", kind="inline", body=reply,
+                        note_created_at=now + timedelta(minutes=1)))
+        await db.flush()
+        return note
+
+    bot_resolved_unverified = await thread("t1", bot, verdict="code_removed")
+    bot_resolved_verified = await thread("t2", bot, verdict="addressed")
+    reply_only_verified = await thread("t3", None, verdict="addressed")
+    human_resolved = await thread("t4", human)
+    human_disagrees = await thread("t5", None, verdict="addressed", reply="not needed, this is intentional")
+
+    await reconcile_mr(db, FakeClient(), repo, mr, None)
+    assert bot_resolved_unverified.disposition == "open"
+    assert bot_resolved_verified.disposition == "accepted_by_followup"
+    assert reply_only_verified.disposition == "accepted_by_followup"
+    assert human_resolved.disposition == "dismissed_ambiguous"
+    assert human_disagrees.disposition == "rejected_with_rationale"
+
+
+async def test_a_human_reviewers_comment_is_rated_like_the_bots_but_never_counted(db):
+    from sqlalchemy import select
+    from argus.domain.models import Feedback
+    repo, mr, disc, bot, reply = await _bot_thread_with_reply(db, "add a timeout")
+    now = datetime.now(timezone.utc)
+    rdisc = Discussion(mr_id=mr.id, provider_discussion_id=uuid.uuid4().hex, resolvable=True,
+                       resolved=True)
+    db.add(rdisc)
+    await db.flush()
+    reviewer = Note(mr_id=mr.id, discussion_id=rdisc.id, provider_note_id=10, author_type="human",
+                    kind="inline", body="This should be done in a transaction", note_created_at=now)
+    author = Note(mr_id=mr.id, discussion_id=rdisc.id, provider_note_id=11, author_type="human",
+                  kind="inline", body="Done", note_created_at=now + timedelta(minutes=5))
+    db.add_all([reviewer, author])
     await db.flush()
 
     result = await reconcile_mr(db, FakeClient(), repo, mr, None)
-    assert human_note.id in result.note_ids
 
-
-async def test_reconcile_mr_does_not_redetect_already_distilled_note(db):
-    repo = Repository(provider="gitlab", project_path="g/dedup-p",
-                      gitlab_project_id=9103)
-    db.add(repo)
-    await db.flush()
-    mr = MergeRequest(repo_id=repo.id, mr_iid=4, title="t", state="opened",
-                      source_branch="s", target_branch="m", head_sha="abc",
-                      web_url="http://x")
-    db.add(mr)
-    await db.flush()
-    disc = Discussion(mr_id=mr.id, provider_discussion_id="d4",
-                      resolvable=True, resolved=False)
-    db.add(disc)
-    await db.flush()
-    human = Actor(username="carol", provider_user_id=6, provider="gitlab")
-    db.add(human)
-    await db.flush()
-    human_note = Note(mr_id=mr.id, discussion_id=disc.id, provider_note_id=4,
-                      author_id=human.id, author_type="human", kind="inline",
-                      body="Already learned from this one",
-                      disposition="open", note_created_at=datetime.now(timezone.utc))
-    db.add(human_note)
-    await db.flush()
-    # Simulate a prior distillation already having consumed this note.
-    learning = Learning(topic="x", hint_text="y", source_note_id=human_note.id)
-    db.add(learning)
-    await db.flush()
-
-    result = await reconcile_mr(db, FakeClient(), repo, mr, None)
-    assert human_note.id not in result.note_ids
+    assert reviewer.disposition == "accepted_manually"
+    assert author.disposition == "open", "only the comment that opened the thread is rated"
+    assert reviewer.id not in result.changed_note_ids
+    assert (await db.execute(select(Feedback).where(Feedback.note_id == reviewer.id))).first() is None

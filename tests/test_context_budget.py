@@ -124,6 +124,65 @@ async def test_error_reports_the_measured_overage():
     assert any(tok in msg for tok in ("input", "tokens"))
 
 
+async def test_max_output_tokens_caps_output_even_with_room_in_the_window():
+    """Groq rejects max_tokens > 16384 on this model even though its real
+    context window is 131072 -- a provider ceiling on OUTPUT length, separate
+    from the context-window budget. A small input would otherwise compute a
+    huge available-output figure (context_window - input - margin); the cap
+    must clamp that down regardless of how much room the window has left."""
+    mw = _DynamicMaxTokens(context_window=130_000, output_margin=4_000,
+                           max_output_tokens=16_384)
+    called = {}
+
+    async def handler(request):
+        called["max_tokens"] = request.model_settings["max_tokens"]
+        return "ok"
+
+    await mw.awrap_model_call(_req(1_000), handler)
+    assert called["max_tokens"] == 16_384
+
+
+async def test_max_output_tokens_does_not_raise_the_cap_when_window_is_tighter():
+    """The cap is a ceiling, not a floor -- if the window-derived budget is
+    already below it (input has grown large), the smaller number must win,
+    exactly like the uncapped behaviour already tested above."""
+    uncapped = _DynamicMaxTokens(context_window=130_000, output_margin=4_000)
+    capped = _DynamicMaxTokens(context_window=130_000, output_margin=4_000,
+                               max_output_tokens=16_384)
+    called = {}
+
+    async def handler(request):
+        called["max_tokens"] = request.model_settings["max_tokens"]
+        return "ok"
+
+    await uncapped.awrap_model_call(_req(120_000), handler)
+    uncapped_budget = called["max_tokens"]
+    assert uncapped_budget < 16_384, \
+        "test setup assumption: window-derived budget must be below the cap here"
+
+    await capped.awrap_model_call(_req(120_000), handler)
+    assert called["max_tokens"] == uncapped_budget
+
+
+async def test_max_output_tokens_unset_preserves_existing_behaviour():
+    """Regression guard: every non-Groq call site passes no cap at all
+    (max_output_tokens=None), which must behave exactly as before this
+    change -- no ceiling beyond the context-window budget."""
+    before = _DynamicMaxTokens(context_window=130_000, output_margin=4_000)
+    after = _DynamicMaxTokens(context_window=130_000, output_margin=4_000,
+                              max_output_tokens=None)
+    called = {}
+
+    async def handler(request):
+        called["max_tokens"] = request.model_settings["max_tokens"]
+        return "ok"
+
+    await before.awrap_model_call(_req(1_000), handler)
+    before_budget = called["max_tokens"]
+    await after.awrap_model_call(_req(1_000), handler)
+    assert called["max_tokens"] == before_budget
+
+
 def test_get_file_lines_caps_total_output_across_ranges(tmp_path):
     """Defect 2: MAX_LINES capped each range, but a requests=[...] list of many
     ranges had no aggregate cap -- ten ~20KB results were what walked scout's

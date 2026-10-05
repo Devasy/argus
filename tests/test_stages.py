@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -59,13 +60,26 @@ async def test_run_stage_agent_retries_with_forced_convergence_directive(monkeyp
     assert result is scout_output
     assert len(agent.calls) == 2
     retry_messages = agent.calls[1]["input"]["messages"]
-    assert retry_messages[0] == ("user", "the user message")
     assert retry_messages[-1][0] == "user"
     assert "Stop reasoning" in retry_messages[-1][1]
-    # the first attempt's own (incomplete) RESULT messages are carried into
-    # the retry, sandwiched between the original user message and the
-    # directive -- not the first attempt's input, its output.
-    assert retry_messages[1:-1] == first_attempt_result["messages"]
+    assert retry_messages[:-1] == first_attempt_result["messages"]
+
+
+async def test_forced_convergence_retry_sends_the_user_message_once(monkeypatch):
+    """Real create_agent results include the input HumanMessage, so the retry
+    must carry that history as-is rather than prepending user_msg again."""
+    scout_output = ScoutOutput(intent="i", mr_summary="s", file_summaries={})
+    first = {"messages": [("user", "the user message"),
+                          SimpleNamespace(content="thinking forever")]}
+    agent = _FakeAgent([first, _structured_result(scout_output)])
+    monkeypatch.setattr("langchain.agents.create_agent", lambda *a, **k: agent)
+
+    await stages.run_stage_agent(
+        model=object(), tools=[], system_prompt="sys", user_msg="the user message",
+        response_model=ScoutOutput, max_rounds=5)
+
+    retry_messages = agent.calls[1]["input"]["messages"]
+    assert retry_messages.count(("user", "the user message")) == 1
 
 
 async def test_run_stage_agent_raises_no_structured_response_error_after_failed_retry(monkeypatch):
@@ -92,3 +106,36 @@ async def test_run_stage_agent_raises_no_structured_response_error_after_failed_
 
 def test_no_structured_response_error_is_an_unrecoverable_stage_error():
     assert NoStructuredResponseError in stages.unrecoverable_stage_errors()
+
+
+async def test_model_gate_limits_concurrent_model_calls():
+    from argus.review.stages import _ModelCallGate
+    gate = _ModelCallGate(asyncio.Semaphore(1))
+    active, peak = 0, 0
+
+    async def handler(request):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return "ok"
+
+    await asyncio.gather(*(gate.awrap_model_call(object(), handler) for _ in range(4)))
+    assert peak == 1
+
+
+async def test_a_nested_call_inside_a_tool_does_not_deadlock():
+    from argus.review.stages import _ModelCallGate
+    sem = asyncio.Semaphore(1)
+    gate = _ModelCallGate(sem)
+
+    async def inner(request):
+        return "inner"
+
+    async def outer(request):
+        return "outer"
+
+    await gate.awrap_model_call(object(), outer)
+    # a "tool" runs outside the gate, and its nested agent's model call can take the slot
+    assert await asyncio.wait_for(gate.awrap_model_call(object(), inner), 1) == "inner"

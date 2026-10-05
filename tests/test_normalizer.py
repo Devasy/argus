@@ -1,17 +1,30 @@
 import json
 from pathlib import Path
 
+import pytest
 from sqlalchemy import func, select
 
 from argus.domain.models import (Actor, Discussion, MergeRequest, MRVersion,
                                      Note, Repository)
-from argus.gitlab.normalizer import classify_system_note, sync_merge_request
+from argus.gitlab.normalizer import classify_author, classify_system_note, sync_merge_request
 
 FIX = Path(__file__).parent / "fixtures" / "gitlab"
 
 
+@pytest.mark.parametrize("username", ["bot_tom", "tom-bot", "project_12_bot_a-extra", "group_3_bot_x_extra"])
+def test_bot_like_human_names_require_positive_bot_metadata(username):
+    assert classify_author(username, set()) == "human"
+    assert classify_author(username, set(), is_bot=True) == "external_bot"
+    assert classify_author(username, {username}) == "bot"
+
+
+@pytest.mark.parametrize("username", ["project_12_bot_abc123", "group_3_bot_ABC123"])
+def test_gitlab_token_bot_names_are_detected(username):
+    assert classify_author(username, set()) == "external_bot"
+
+
 def fx(name):
-    return json.loads((FIX / f"{name}.json").read_text())
+    return json.loads((FIX / f"{name}.json").read_text(encoding="utf-8"))
 
 
 async def _make_repo(db):
@@ -31,14 +44,14 @@ async def test_sync_creates_entities(db):
     repo = await _make_repo(db)
     mr = await _sync(db, repo)
     assert mr.mr_iid == 36
-    n_notes = (await db.execute(select(func.count(Note.id)))).scalar()
-    n_disc = (await db.execute(select(func.count(Discussion.id)))).scalar()
-    n_ver = (await db.execute(select(func.count(MRVersion.id)))).scalar()
+    n_notes = (await db.execute(select(func.count(Note.id)).where(Note.mr_id == mr.id))).scalar()
+    n_disc = (await db.execute(select(func.count(Discussion.id)).where(Discussion.mr_id == mr.id))).scalar()
+    n_ver = (await db.execute(select(func.count(MRVersion.id)).where(MRVersion.mr_id == mr.id))).scalar()
     assert n_notes > 20 and n_disc > 10 and n_ver == len(fx("versions"))
     # bot author classified
     bot_notes = (await db.execute(
         select(Note).join(Actor, Note.author_id == Actor.id)
-        .where(Actor.username == "pr_agent"))).scalars().all()
+        .where(Actor.username == "pr_agent", Note.mr_id == mr.id))).scalars().all()
     assert bot_notes and all(n.author_type == "bot" for n in bot_notes)
     # the !36 suggestion note carries its suggestions payload
     sugg = [n for n in bot_notes if n.suggestions]

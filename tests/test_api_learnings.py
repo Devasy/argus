@@ -91,6 +91,32 @@ async def test_list_learnings_rejects_invalid_status(api):
     assert r.status_code == 422
 
 
+async def test_list_learnings_rejects_invalid_scope(api):
+    r = await api.get("/learnings", params={"scope": "not-a-real-scope"})
+    assert r.status_code == 422
+
+
+async def test_list_learnings_rejects_repo_scope_without_repo_id(api):
+    r = await api.get("/learnings", params={"scope": "repo"})
+    assert r.status_code == 422
+
+
+async def test_list_learnings_filters_by_audited_over_the_route(api, engine):
+    await _seed(engine, topic="api-test-audited", groundedness=0.7)
+    await _seed(engine, topic="api-test-unaudited")
+    r = await api.get("/learnings", params={"audited": "true"})
+    topics = {l["topic"] for l in r.json()["items"]}
+    assert "api-test-audited" in topics and "api-test-unaudited" not in topics
+
+
+async def test_list_learnings_filters_by_strength_min_over_the_route(api, engine):
+    await _seed(engine, topic="api-test-strong", hit_count=25)
+    await _seed(engine, topic="api-test-weak", harmful_count=9)
+    r = await api.get("/learnings", params={"strength_min": 0.5})
+    topics = {l["topic"] for l in r.json()["items"]}
+    assert "api-test-strong" in topics and "api-test-weak" not in topics
+
+
 async def test_search_learnings_rejects_empty_query(api):
     r = await api.get("/learnings/search", params={"q": "  "})
     assert r.status_code == 422
@@ -98,7 +124,14 @@ async def test_search_learnings_rejects_empty_query(api):
 
 async def test_search_learnings_shape(api, engine, monkeypatch):
     from argus.api import app as app_module
-    async def fake_search(session, settings, *, query_text, repo_id=None, page=1, per_page=20):
+    async def fake_search(session, settings, *, query_text, repo_id=None, scope=None,
+                          kind=None, kind_not=None, status=None, status_not=None,
+                          groundedness_min=None,
+                          groundedness_max=None, audited=None, hit_count_min=None,
+                          harmful_count_min=None, miss_count_min=None,
+                          no_verdicts=None, strength_min=None, strength_max=None,
+                          created_after=None, created_before=None, mr_iid=None,
+                          learned_from_username=None, page=1, per_page=20):
         return [], 0
     monkeypatch.setattr(app_module, "search_learnings", fake_search)
     r = await api.get("/learnings/search", params={"q": "auth"})

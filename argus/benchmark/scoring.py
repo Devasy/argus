@@ -42,7 +42,8 @@ def score_mr(items: list[Item], findings: list[dict]) -> MRScore:
     matched_findings: set[int] = set()
 
     for item in items:
-        hit = next((i for i, f in enumerate(kept) if matches(item, f)), None)
+        hit = next((i for i, f in enumerate(kept)
+                    if i not in matched_findings and matches(item, f)), None)
         if hit is not None:
             matched_findings.add(hit)
         if item.verdict == "human_right":

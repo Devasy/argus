@@ -62,6 +62,12 @@ const CONFIG: Record<string, Config> = {
     icon: Circle,
   },
   closed: { bg: "var(--bg-raised)", color: "var(--text-tertiary)", label: "Closed", icon: XCircle },
+  stale: {
+    bg: "var(--state-warning-bg)",
+    color: "var(--state-warning)",
+    label: "Stale",
+    icon: Clock,
+  },
 };
 
 const FALLBACK: Config = {

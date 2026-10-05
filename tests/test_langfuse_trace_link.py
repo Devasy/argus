@@ -26,7 +26,7 @@ def test_trace_id_is_committed_before_any_review_work():
     src = _source()
     assign = src.index("review.langfuse_trace_id = langfuse_run.trace_id")
     commit = src.index("await s.commit()", assign)
-    gitlab_call = src.index("await gitlab.get_merge_request")
+    gitlab_call = src.index("await fetch_consistent_mr(")
     assert assign < commit < gitlab_call
 
 

@@ -73,47 +73,47 @@ def sister_ws(tmp_path):
 
 
 def _tools(ws):
-    s = Sister("party-plan-backend", "party-plan/party-plan-backend", ws, "develop", "a" * 40,
+    s = Sister("event-mgr-backend", "event-mgr/event-mgr-backend", ws, "develop", "a" * 40,
                "default branch")
     return {t.name: t for t in build_sister_tools([s])}
 
 
 async def test_every_result_is_labelled_reference_only(sister_ws):
-    out = await _tools(sister_ws)["sister_list_files"].ainvoke({"repo": "party-plan-backend"})
-    assert out.startswith("[sister repo party-plan-backend @ develop aaaaaaaa (default branch)")
+    out = await _tools(sister_ws)["sister_list_files"].ainvoke({"repo": "event-mgr-backend"})
+    assert out.startswith("[sister repo event-mgr-backend @ develop aaaaaaaa (default branch)")
     assert "reference only" in out
 
 
 async def test_list_files_root_glob_and_skips_git(sister_ws):
     t = _tools(sister_ws)["sister_list_files"]
-    root = await t.ainvoke({"repo": "party-plan-backend"})
+    root = await t.ainvoke({"repo": "event-mgr-backend"})
     assert "src/" in root and ".git" not in root
-    hits = await t.ainvoke({"repo": "party-plan/party-plan-backend", "glob": "**/*.dto.ts"})
+    hits = await t.ainvoke({"repo": "event-mgr/event-mgr-backend", "glob": "**/*.dto.ts"})
     assert "src/dto/media.dto.ts" in hits
 
 
 async def test_list_files_cannot_escape_the_checkout(sister_ws):
     t = _tools(sister_ws)["sister_list_files"]
-    assert "secret.txt" not in await t.ainvoke({"repo": "party-plan-backend", "glob": "../*"})
-    assert "no such directory" in await t.ainvoke({"repo": "party-plan-backend", "path": "../.."})
+    assert "secret.txt" not in await t.ainvoke({"repo": "event-mgr-backend", "glob": "../*"})
+    assert "no such directory" in await t.ainvoke({"repo": "event-mgr-backend", "path": "../.."})
 
 
 async def test_read_file_ranges_binary_escape_and_unknown_repo(sister_ws):
     t = _tools(sister_ws)["sister_read_file"]
-    out = await t.ainvoke({"repo": "party-plan-backend", "path": "src/dto/media.dto.ts",
+    out = await t.ainvoke({"repo": "event-mgr-backend", "path": "src/dto/media.dto.ts",
                            "start": 2, "end": 3})
     assert "isPublic?: boolean" in out and "export class" not in out and "(lines 2-3 of 4)" in out
-    assert "binary file" in await t.ainvoke({"repo": "party-plan-backend", "path": "logo.png"})
+    assert "binary file" in await t.ainvoke({"repo": "event-mgr-backend", "path": "logo.png"})
     assert "escapes the repository root" in await t.ainvoke(
-        {"repo": "party-plan-backend", "path": "../secret.txt"})
+        {"repo": "event-mgr-backend", "path": "../secret.txt"})
     assert "unknown sister repo" in await t.ainvoke({"repo": "frontend", "path": "x"})
 
 
 async def test_search_finds_the_field_the_bot_missed(sister_ws):
     t = _tools(sister_ws)["sister_search"]
-    out = await t.ainvoke({"repo": "party-plan-backend", "pattern": "isPublic"})
+    out = await t.ainvoke({"repo": "event-mgr-backend", "pattern": "isPublic"})
     assert "media.dto.ts" in out and out.startswith("[sister repo")
-    assert "invalid regex" in await t.ainvoke({"repo": "party-plan-backend", "pattern": "("})
+    assert "invalid regex" in await t.ainvoke({"repo": "event-mgr-backend", "pattern": "("})
 
 
 def test_no_sisters_means_no_tools_and_no_prompt():
@@ -122,9 +122,9 @@ def test_no_sisters_means_no_tools_and_no_prompt():
 
 
 def test_prompt_names_sisters_marks_unavailable_ones_and_forbids_findings(tmp_path):
-    s = Sister("party-plan-backend", "p/b", tmp_path, "feature/x", "a" * 40, "same branch as this MR")
-    block = sister_prompt_block([s], [{"name": "party-plan-backend"}, {"name": "ui", "error": "403"}])
-    assert "party-plan-backend @ feature/x (same branch as this MR)" in block
+    s = Sister("event-mgr-backend", "p/b", tmp_path, "feature/x", "a" * 40, "same branch as this MR")
+    block = sister_prompt_block([s], [{"name": "event-mgr-backend"}, {"name": "ui", "error": "403"}])
+    assert "event-mgr-backend @ feature/x (same branch as this MR)" in block
     assert "ui: unavailable this review" in block
     assert "Never report a finding on sister-repo code" in block
 

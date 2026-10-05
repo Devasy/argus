@@ -31,8 +31,12 @@ async def reset_stale_events(session: AsyncSession) -> int:
     for ev in events:
         ev.outcome = "pending"
         ev.resolved_at = None
-    await session.execute(
-        update(Learning).values(miss_count=0, inconclusive_count=0))
+    touched = {ev.learning_id for ev in events}
+    if touched:
+        # only learnings whose counters those verdicts fed; others hold real, current counts
+        await session.execute(
+            update(Learning).where(Learning.id.in_(touched))
+            .values(miss_count=0, inconclusive_count=0))
     await session.flush()
     return len(events)
 

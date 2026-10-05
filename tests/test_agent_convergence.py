@@ -406,3 +406,19 @@ def test_recursion_limit_still_grows_with_the_budget():
 
     assert recursion_limit_for(3) < recursion_limit_for(10) < recursion_limit_for(25)
     assert recursion_limit_for(20) > 24, "the old distiller value must be cleared"
+
+
+# --- one item larger than the whole limit -----------------------------------
+
+def test_an_oversized_single_item_is_clipped_not_dropped():
+    from argus.review.tools import MAX_TOOL_RESULT_CHARS, TRUNCATION_MARKER, _truncate_result
+    out = _truncate_result(["H" * (MAX_TOOL_RESULT_CHARS + 5000)], "hunks")
+    assert out.startswith("HHHH") and "[clipped:" in out and TRUNCATION_MARKER not in out
+    assert len(out) <= MAX_TOOL_RESULT_CHARS
+
+
+def test_an_oversized_item_does_not_hide_the_small_ones_after_it():
+    from argus.review.tools import MAX_TOOL_RESULT_CHARS, TRUNCATION_MARKER, _truncate_result
+    out = _truncate_result(["small-a", "B" * (MAX_TOOL_RESULT_CHARS + 1), "small-c"], "hunks")
+    assert "small-a" in out and "small-c" in out and "BBBB" not in out
+    assert "1 of 3 hunks" in out and TRUNCATION_MARKER in out

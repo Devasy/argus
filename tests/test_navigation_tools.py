@@ -258,3 +258,66 @@ async def test_all_three_readers_agree_on_what_is_reachable(repo):
         {"pattern": "class Widget", "context": 0})
     assert "import React" in await tools["get_file_lines"].ainvoke(
         {"requests": [{"path": "src/Widget.tsx", "start": 1, "end": 2}]})
+
+
+def test_python_search_stops_at_its_deadline(tmp_path):
+    import time
+    from argus.review import navigation
+    for i in range(50):
+        (tmp_path / f"m{i}.py").write_text("needle\n")
+    hits = navigation._search_python(tmp_path, "needle", "", 0, 1000,
+                                     deadline=time.monotonic() - 1)
+    assert not any("needle" in h for h in hits)
+    assert any("partial" in h for h in hits)
+
+
+def test_python_search_interrupts_pathological_regex(tmp_path):
+    import time
+    from argus.review import navigation
+
+    (tmp_path / "long.txt").write_text("a" * 9999 + "!\n")
+    started = time.monotonic()
+    hits = navigation._search_python(tmp_path, "(a+)+$", "", 0, 50,
+                                     deadline=started + 0.05)
+    assert time.monotonic() - started < 2
+    assert any("partial" in hit for hit in hits)
+    # The same worker has returned and remains usable for a normal search.
+    assert navigation._search_python(tmp_path, "!", "", 0, 50)
+
+
+async def test_search_returns_when_the_backend_hangs(tmp_path, monkeypatch):
+    import time
+    from argus.review import navigation
+    monkeypatch.setattr(navigation, "SEARCH_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(navigation, "_search_ripgrep", lambda *a: None)
+    monkeypatch.setattr(navigation, "_search_python",
+                        lambda *a, **k: time.sleep(2) or ["late"])
+    t0 = time.monotonic()
+    hits = await navigation.search(tmp_path, "x")
+    assert time.monotonic() - t0 < 1.5
+    assert hits and "timed out" in hits[0]
+
+
+async def test_ripgrep_timeout_is_reported_not_turned_into_no_matches(tmp_path, monkeypatch):
+    import subprocess
+    from argus.review import navigation
+    (tmp_path / "a.py").write_text("needle\n")
+    monkeypatch.setattr(navigation.shutil, "which", lambda name: "/usr/bin/rg")
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="rg", timeout=navigation.SEARCH_TIMEOUT_S)
+    monkeypatch.setattr(navigation.subprocess, "run", boom)
+    hits = await navigation.search(tmp_path, "needle")
+    assert hits and "timed out" in hits[0]
+
+
+def test_python_search_flags_partial_results_at_its_deadline(tmp_path, monkeypatch):
+    import time
+    from argus.review import navigation
+    for i in range(3):
+        (tmp_path / f"m{i}.py").write_text("needle\n")
+    calls = iter([0.0, 0.0, 99.0, 99.0, 99.0])
+    monkeypatch.setattr(navigation.time, "monotonic", lambda: next(calls))
+    hits = navigation._search_python(tmp_path, "needle", "", 0, 1000, deadline=10.0)
+    assert any("partial" in h for h in hits)
+    assert any("needle" in h for h in hits)

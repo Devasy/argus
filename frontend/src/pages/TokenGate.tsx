@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { KeyRound } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { checkHealth, setToken } from "../api/client";
 
 export default function TokenGate() {
@@ -14,9 +15,12 @@ export default function TokenGate() {
     checkHealth().then(setBackendUp);
   }, []);
 
+  const qc = useQueryClient();
+
   const save = () => {
     if (!value.trim()) return;
     setToken(value.trim());
+    qc.invalidateQueries({ queryKey: ["me"] });
     navigate(from, { replace: true });
   };
 

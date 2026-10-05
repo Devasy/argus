@@ -90,8 +90,25 @@ def numbered(text: str | None, line: int, span: int = SNIPPET_SPAN) -> str:
     return "\n".join(f"{i:>5}{'>' if i == line else ' '} {rows[i - 1]}" for i in range(lo, hi + 1))
 
 
-def parse_verdict(text: str) -> tuple[str, str]:
-    body = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S)
+def _text_of(content) -> str:
+    """A langchain message's .content, normalized to plain text.
+
+    content is a list of blocks -- not a plain string -- whenever the model
+    ran with reasoning enabled: langchain_litellm's
+    _inject_reasoning_content_into_content prepends a {"type": "thinking"}
+    block ahead of the real {"type": "text"} answer. Only the text blocks are
+    kept, so a stray {...} inside the model's own reasoning is never mistaken
+    for its actual verdict."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content
+                       if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def parse_verdict(text) -> tuple[str, str]:
+    body = re.sub(r"<think>.*?</think>", "", _text_of(text), flags=re.S)
     for m in re.finditer(r"\{[^{}]*\}", body, re.S):
         try:
             data = json.loads(m.group(0))

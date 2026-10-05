@@ -70,6 +70,52 @@ async def test_no_endpoint_raises(db):
         await resolve_llm_config(db, None, None)
 
 
+async def test_endpoint_accepts_groq_provider(db, monkeypatch):
+    monkeypatch.setenv("TEST_GROQ_KEY", "gsk-test")
+    ep = LLMEndpoint(name="groq-qwen38", provider="groq",
+                     model="groq/qwen/qwen3.8-27b",
+                     api_key_ref="TEST_GROQ_KEY", is_default=True)
+    db.add(ep)
+    await db.flush()
+    cfg = await resolve_llm_config(db, None, None)
+    assert cfg.provider == "groq"
+    assert cfg.api_key == "gsk-test"
+
+
+async def test_endpoint_with_fallback_populates_fallback_dict(db, monkeypatch):
+    """A Groq endpoint naming a local llama.cpp endpoint as its
+    fallback_endpoint_id must resolve that second endpoint's own api_key
+    (via its own api_key_ref) and hand back a litellm-shaped dict, not just
+    the FK id -- build_chat_model has no session to do this resolution
+    itself."""
+    monkeypatch.setenv("TEST_GROQ_KEY", "gsk-test")
+    local = LLMEndpoint(name="ollama-qwen-default", provider="ollama",
+                        model="openai/qwen3.8-27b",
+                        base_url="http://127.0.0.1:8090/v1",
+                        is_default=False)
+    db.add(local)
+    await db.flush()
+    ep = LLMEndpoint(name="groq-qwen38", provider="groq",
+                     model="groq/qwen/qwen3.8-27b",
+                     api_key_ref="TEST_GROQ_KEY", is_default=True,
+                     fallback_endpoint_id=local.id)
+    db.add(ep)
+    await db.flush()
+    cfg = await resolve_llm_config(db, None, None)
+    assert cfg.fallback == {"provider": "ollama", "model": "openai/qwen3.8-27b",
+                            "api_base": "http://127.0.0.1:8090/v1",
+                            "api_key": None}
+
+
+async def test_endpoint_without_fallback_leaves_fallback_none(db):
+    ep = LLMEndpoint(name="claude-api2", provider="anthropic",
+                     model="anthropic/claude-sonnet-4-5", is_default=True)
+    db.add(ep)
+    await db.flush()
+    cfg = await resolve_llm_config(db, None, None)
+    assert cfg.fallback is None
+
+
 def test_prompt_block_order():
     blocks = PromptBlocks(static="S", per_mr="M", per_agent="A")
     assert assemble_system_prompt(blocks) == "S\n\nM\n\nA"

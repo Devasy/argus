@@ -59,9 +59,12 @@ def test_exemption_set_is_narrow():
     navigation, withheld only by accident of a profile predating them.
     report_problem: the agents carrying custom allowlists are the ones whose
     configuration is most likely to be wrong, so denying them the complaint
-    channel silences the reports that matter most."""
+    channel silences the reports that matter most. sister_*: read-only
+    navigation that exists only when a repo opted into related repos, which is
+    itself the grant -- an allowlist predating them would silently undo it."""
     assert ALWAYS_AVAILABLE_TOOLS == frozenset({"outline_file", "search_code",
-                                                "report_problem"})
+                                                "report_problem", "sister_list_files",
+                                                "sister_read_file", "sister_search"})
 
 
 # --- graph tools must never dead-end ---------------------------------------

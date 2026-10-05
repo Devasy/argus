@@ -14,6 +14,7 @@ export default function RepoSistersPanel({ repoId }: { repoId: string }) {
   const save = useSetRepoSisters(repoId);
   const [rows, setRows] = useState<RepoSisterLinkIn[]>([]);
   const [dirty, setDirty] = useState(false);
+  const [editing, setEditing] = useState(false);
 
   useEffect(() => {
     if (sisters.data && !dirty) {
@@ -50,11 +51,17 @@ export default function RepoSistersPanel({ repoId }: { repoId: string }) {
   const onSave = () =>
     save.mutate(
       [rows.map((r) => ({ ...r, branch: r.branch?.trim() ? r.branch.trim() : null }))],
-      { onSuccess: () => setDirty(false) },
+      { onSuccess: () => { setDirty(false); setEditing(false); } },
     );
 
+  const onCancel = () => {
+    setDirty(false);
+    setEditing(false);
+    save.reset();
+  };
+
   return (
-    <div className="f-row">
+    <div className="ui-card section f-row">
       <div className="fl">
         <b>Related repositories</b>
         <span>
@@ -66,19 +73,28 @@ export default function RepoSistersPanel({ repoId }: { repoId: string }) {
 
       <div>
         {sisters.isPending && <span className="muted">Loading…</span>}
-        {!sisters.isPending && rows.length === 0 && (
+        {!sisters.isPending && (editing ? rows.length : sisters.data?.length ?? 0) === 0 && (
           <p className="muted" style={{ margin: 0 }}>
             None. Reviews only see this repository.
           </p>
         )}
 
-        {rows.map((r, i) => (
+        {!editing && sisters.data?.map((r) => (
+          <p key={r.sister_repo_id} className="muted">
+            {r.sister_project_path} · {r.match_source_branch ? "prefer MR branches; " : ""}
+            {r.branch ?? r.sister_default_branch ?? "default branch"}
+            {!r.enabled && " · disabled"}
+          </p>
+        ))}
+
+        {editing && rows.map((r, i) => (
           <div
             key={`${r.sister_repo_id}-${i}`}
             style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}
           >
             <select
               value={r.sister_repo_id}
+              disabled={save.isPending}
               aria-label="Related repository"
               onChange={(e) => update(i, { sister_repo_id: e.target.value })}
             >
@@ -90,33 +106,43 @@ export default function RepoSistersPanel({ repoId }: { repoId: string }) {
             </select>
             <input
               value={r.branch ?? ""}
+              disabled={save.isPending}
               aria-label="Branch"
               placeholder={`branch (default: ${defaultBranch(r.sister_repo_id) ?? "repo default"})`}
               onChange={(e) => update(i, { branch: e.target.value })}
             />
             <Toggle
               checked={r.match_source_branch}
+              disabled={save.isPending}
               onChange={(next) => update(i, { match_source_branch: next })}
               label="Prefer the MR's branch names"
             />
             <span className="muted">prefer MR branches</span>
-            <button type="button" className="linkish" onClick={() => remove(i)}>
+            <button type="button" className="linkish" onClick={() => remove(i)} disabled={save.isPending}>
               Remove
             </button>
           </div>
         ))}
 
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
-          <button
+          {!editing && <button type="button" className="btn-o"
+            disabled={sisters.isPending || sisters.isError}
+            onClick={() => { save.reset(); setEditing(true); }}>
+            Edit related repositories
+          </button>}
+          {editing && <button
             type="button"
             className="btn-o"
             onClick={add}
-            disabled={rows.length >= MAX_SISTERS || others.length <= rows.length}
+            disabled={save.isPending || rows.length >= MAX_SISTERS || others.length <= rows.length}
           >
             Add related repo
-          </button>
-          {dirty && (
-            <button type="button" className="btn-p" onClick={onSave} disabled={save.isPending}>
+          </button>}
+          {editing && <button type="button" className="btn-o" onClick={onCancel} disabled={save.isPending}>
+            Cancel related repo changes
+          </button>}
+          {editing && (
+            <button type="button" className="btn-p" onClick={onSave} disabled={!dirty || save.isPending}>
               {save.isPending ? "Saving…" : "Save related repos"}
             </button>
           )}
@@ -125,6 +151,7 @@ export default function RepoSistersPanel({ repoId }: { repoId: string }) {
               {(save.error as Error).message}
             </span>
           )}
+          {sisters.isError && <span className="muted" role="alert">{sisters.error.message}</span>}
         </div>
       </div>
     </div>

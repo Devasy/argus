@@ -15,14 +15,15 @@ they call for opposite fixes.
 import argparse
 import asyncio
 import logging
+import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from argus.benchmark import scoring, spec
-from argus.domain.models import (MergeRequest, Repository, Review,
-                                     ReviewStage)
-from argus.jobs.queue import enqueue
+from argus.domain.models import (LLMEndpoint, MergeRequest, Repository,
+                                     Review, ReviewStage)
+from argus.jobs.queue import PRIORITY_BENCHMARK_OR_AUDIT, enqueue
 from argus.llm.config import resolve_llm_config
 from argus.review.candidates import review_candidates
 
@@ -37,13 +38,30 @@ async def _resolve_mr(session, mr: spec.GoldenMR) -> MergeRequest | None:
                MergeRequest.mr_iid == mr.mr_iid))).scalar_one_or_none()
 
 
+async def _resolve_endpoint_id(session, endpoint_name: str | None
+                               ) -> uuid.UUID | None:
+    """None means "use whatever is_default is" -- resolve_llm_config's own
+    existing behaviour, unchanged. Passing a name lets a benchmark run target
+    a specific endpoint (e.g. a fast hosted one) without touching is_default,
+    which the production poller also reads (see resolve_llm_config)."""
+    if endpoint_name is None:
+        return None
+    ep = (await session.execute(select(LLMEndpoint).where(
+        LLMEndpoint.name == endpoint_name))).scalar_one_or_none()
+    if ep is None:
+        raise SystemExit(f"no llm_endpoints row named {endpoint_name!r}")
+    return ep.id
+
+
 async def trigger(sf: async_sessionmaker, dry_run: bool = True,
-                  scored_only: bool = True) -> dict:
+                  scored_only: bool = True,
+                  endpoint_name: str | None = None) -> dict:
     gs = spec.load()
     queued, missing, skipped = [], [], []
     async with sf() as s:
+        endpoint_id = await _resolve_endpoint_id(s, endpoint_name)
         try:
-            cfg = await resolve_llm_config(s, None, None)
+            cfg = await resolve_llm_config(s, endpoint_id, None)
         except ValueError as e:
             raise SystemExit(f"no usable LLM endpoint: {e}")
         for gm in spec.select(gs, scored_only):
@@ -59,8 +77,12 @@ async def trigger(sf: async_sessionmaker, dry_run: bool = True,
                             publish=False)
             s.add(review)
             await s.flush()
-            job = await enqueue(s, "review", {"review_id": str(review.id)},
-                                dedup_key=f"review:{row.id}:full:dry")
+            # Explicit priority: this reuses the "review" job kind, but a
+            # dry-run benchmark pass must never queue-jump a real review.
+            job = await enqueue(s, "review", {"review_id": str(review.id),
+                                              "pinned": endpoint_id is not None},
+                                dedup_key=f"review:{row.id}:full:dry",
+                                priority=PRIORITY_BENCHMARK_OR_AUDIT)
             if job is None:
                 logger.warning("a dry run for %s!%d is already in flight",
                                gm.project_path, gm.mr_iid)
@@ -148,6 +170,13 @@ async def _main() -> None:
     p.add_argument("--all", action="store_true",
                    help="include the behavioural-only MRs; they add roughly "
                         "26h of serial worker time and cannot be scored")
+    p.add_argument("--endpoint-name", default=None,
+                   help="trigger only: use this named llm_endpoints row "
+                        "instead of whichever one is_default -- the same "
+                        "is_default row the production poller also reads, "
+                        "so this is how a benchmark run targets e.g. a Groq "
+                        "endpoint without changing what real GitLab-"
+                        "triggered reviews use")
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -167,7 +196,8 @@ async def _main() -> None:
     sf = session_factory(get_engine(settings.database_url))
     if args.command == "trigger":
         await trigger(sf, dry_run=not args.apply,
-                      scored_only=not args.all)
+                      scored_only=not args.all,
+                      endpoint_name=args.endpoint_name)
     else:
         await score(sf)
 

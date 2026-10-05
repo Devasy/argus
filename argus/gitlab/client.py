@@ -13,8 +13,10 @@ class GitLabClient:
         self._http = httpx.AsyncClient(
             base_url=base_url.rstrip("/") + "/api/v4",
             headers={"PRIVATE-TOKEN": token},
-            verify=ssl_verify,
+            # retries re-attempt only a failed connect (e.g. a DNS blip), never a sent request
+            transport=httpx.AsyncHTTPTransport(verify=ssl_verify, retries=2, trust_env=True),
             timeout=30.0,
+            trust_env=True,
         )
 
     async def aclose(self) -> None:
@@ -74,7 +76,8 @@ class GitLabClient:
             sort="asc", order_by="created_at")
 
     async def list_versions(self, project, iid) -> list[dict]:
-        return await self._get(f"/projects/{self._proj(project)}/merge_requests/{iid}/versions")
+        return await self._get_paginated(
+            f"/projects/{self._proj(project)}/merge_requests/{iid}/versions")
 
     async def list_diffs(self, project, iid) -> list[dict]:
         return await self._get_paginated(
@@ -93,6 +96,15 @@ class GitLabClient:
     async def get_note_awards(self, project, iid, note_id) -> list[dict]:
         return await self._get(
             f"/projects/{self._proj(project)}/merge_requests/{iid}/notes/{note_id}/award_emoji")
+
+    async def get_branch(self, project, branch: str) -> dict | None:
+        """The branch (with its tip `commit`), or None if it doesn't exist."""
+        r = await self._http.get(f"/projects/{self._proj(project)}/repository/branches/"
+                                 f"{urllib.parse.quote(branch, safe='')}")
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
 
     async def compare(self, project, frm: str, to: str) -> dict:
         return await self._get(f"/projects/{self._proj(project)}/repository/compare",

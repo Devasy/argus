@@ -55,15 +55,9 @@ def test_the_toggles_are_actually_ui_editable():
 # pin the actual defect -- gates reading `settings` instead of `boot` -- and
 # would have caught it.
 
-
-def test_manual_audit_records_a_returned_failure_as_failed():
-    """run_audit_for_repo RETURNS {"status": "failed"} for a failed workspace
-    clone rather than raising, so keying status purely off exceptions recorded
-    "done" for a run that examined zero clusters -- indistinguishable from a
-    repo whose learnings were all fine. Observed on audit_run
-    68cd3025-5e4c-45cb-b969-51dcfda7fb14."""
-    src = inspect.getsource(create_app)
-    start = src.index("async def trigger_audit(")
-    body = src[start:src.index("@router.get(\"/audit-verdicts\"", start)]
-    assert 'result.get("status") == "failed"' in body
-    assert 'status = "failed"' in body
+# The manual-trigger route used to run an audit synchronously and could read a
+# RETURNED {"status": "failed"} as "done" (audit_run 68cd3025-5e4c-45cb-
+# b969-51dcfda7fb14). trigger_audit now only enqueues an audit_repo job;
+# run_audit_job (audit_job.py) sets status="failed" in its own except/finally,
+# unconditionally, on any exception -- there is no returned-dict path left to
+# misread, so that regression class no longer applies here.

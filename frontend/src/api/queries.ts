@@ -1,8 +1,17 @@
 import { useMutation, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
-import { api } from "./client";
-import type { ProfileVersionIn, Repository, SettingsView, ReviewerAgentCreate, NoteVerdictIn } from "./types";
+import { api, getToken } from "./client";
+import type {
+  ProfileVersionIn,
+  Repository,
+  SettingsView,
+  ReviewerAgentCreate,
+  NoteVerdictIn,
+  RepoSisterLinkIn,
+  LearningsQueryParams,
+} from "./types";
 
 export const queryKeys = {
+  me: (token?: string | null) => ["me", token ?? ""] as const,
   repositories: (page: number, per_page: number) => ["repositories", page, per_page] as const,
   repository: (id: string) => ["repositories", id] as const,
   mrs: (repoId: string, state: string | undefined, page: number, per_page: number) =>
@@ -16,11 +25,14 @@ export const queryKeys = {
   agentVersions: (id: string, page: number, per_page: number) =>
     ["agents", id, "versions", page, per_page] as const,
   agentUsage: (id: string) => ["agents", id, "usage"] as const,
-  learnings: (filters: Record<string, string | number>) => ["learnings", filters] as const,
+  learnings: (filters: LearningsQueryParams & { page?: number; per_page?: number }) =>
+    ["learnings", filters] as const,
   complaints: (filters: Record<string, string | number | boolean>) =>
     ["complaints", filters] as const,
-  learningsSearch: (q: string, filters: Record<string, string | number>) =>
-    ["learnings", "search", q, filters] as const,
+  learningsSearch: (
+    q: string,
+    filters: LearningsQueryParams & { page?: number; per_page?: number },
+  ) => ["learnings", "search", q, filters] as const,
   fileKnowledge: (repoId: string, page: number, per_page: number) =>
     ["file-knowledge", repoId, page, per_page] as const,
   auditVerdicts: (state: string, page: number, per_page: number, includeNoAction?: boolean) =>
@@ -33,8 +45,13 @@ export const queryKeys = {
   distillationRunTrace: (id: string) => ["distillation-runs", id, "trace"] as const,
   auditRuns: (repoId: string | undefined, page: number, per_page: number) =>
     ["audit-runs", repoId ?? "all", page, per_page] as const,
+  auditRun: (id: string) => ["audit-runs", id] as const,
   auditRunTrace: (id: string) => ["audit-runs", id, "trace"] as const,
   dashboard: (days: number) => ["dashboard", days] as const,
+  tatStats: ["stats", "tat"] as const,
+  userStats: (days: number) => ["stats", "users", days] as const,
+  reviewerGraph: ["stats", "reviewer-graph"] as const,
+  commentSourceStats: (days: number) => ["stats", "comment-sources", days] as const,
 };
 
 export const useRepositories = (page = 1, per_page = 20) =>
@@ -83,6 +100,18 @@ function useInvalidating<TArgs extends unknown[], TOut>(
 
 export const useCreateRepository = () =>
   useInvalidating((path: string) => api.createRepository(path), [["repositories"]]);
+export const useRepoSisters = (repoId: string) =>
+  useQuery({
+    queryKey: ["repo-sisters", repoId] as const,
+    queryFn: () => api.repoSisters(repoId),
+  });
+
+export const useSetRepoSisters = (repoId: string) =>
+  useInvalidating(
+    (links: RepoSisterLinkIn[]) => api.setRepoSisters(repoId, links),
+    [["repo-sisters"]],
+  );
+
 export const useRepoAgents = (repoId: string) =>
   useQuery({
     queryKey: ["repo-agents", repoId] as const,
@@ -100,7 +129,15 @@ export const useUpdateRepository = () =>
     (
       id: string,
       patch: Partial<
-        Pick<Repository, "enabled" | "poll_interval_s" | "default_profile_id" | "auto_review_enabled">
+        Pick<
+          Repository,
+          | "enabled"
+          | "poll_interval_s"
+          | "stale_mr_after_days"
+          | "learnings_cooldown_hours"
+          | "default_profile_id"
+          | "auto_review_enabled"
+        >
       >,
     ) => api.updateRepository(id, patch),
     [["repositories"]],
@@ -185,18 +222,12 @@ export const useComplaints = (
 ) => useQuery({ queryKey: queryKeys.complaints(filters), queryFn: () => api.complaints(filters) });
 
 export const useLearnings = (
-  filters: {
-    repo_id?: string;
-    kind?: string;
-    status?: string;
-    page?: number;
-    per_page?: number;
-  } = {},
+  filters: LearningsQueryParams & { page?: number; per_page?: number } = {},
 ) => useQuery({ queryKey: queryKeys.learnings(filters), queryFn: () => api.learnings(filters) });
 
 export const useLearningsSearch = (
   q: string,
-  filters: { repo_id?: string; page?: number; per_page?: number } = {},
+  filters: LearningsQueryParams & { page?: number; per_page?: number } = {},
 ) =>
   useQuery({
     queryKey: queryKeys.learningsSearch(q, filters),
@@ -310,9 +341,55 @@ export const useAuditRunTrace = (id: string) =>
 /** Run the auditor for one repo now, rather than waiting for its interval. */
 export const useTriggerAudit = () =>
   useInvalidating(
-    (repoId: string, maxClusters?: number) => api.triggerAudit(repoId, maxClusters),
+    (repoId: string) => api.triggerAudit(repoId),
     [["audit-verdicts"], ["learnings"], ["audit-runs"]],
   );
+
+export const useAuditRun = (id: string) =>
+  useQuery({
+    queryKey: queryKeys.auditRun(id),
+    queryFn: () => api.auditRun(id),
+    // The pipeline runs in the background; the page polls while it's still live.
+    refetchInterval: (q) =>
+      q.state.data && (q.state.data.status === "queued" || q.state.data.status === "running")
+        ? 5000
+        : false,
+  });
+
+// Who the current token resolves to, per the backend's role model (api/auth.py).
+// Drives both nav visibility (App.tsx) and whether the admin-only queries
+// below are even attempted -- a single source of truth instead of a second
+// "do I have an admin token" guess living in localStorage.
+export const useMe = () => {
+  const token = getToken();
+  return useQuery({
+    queryKey: queryKeys.me(token),
+    queryFn: api.me,
+    retry: false,
+    staleTime: 60_000,
+  });
+};
+
+// Admin-only queries. Callers pass `enabled` derived from useMe()'s role so
+// a non-admin session never fires a doomed request.
+export const useTatStats = (enabled: boolean) =>
+  useQuery({ queryKey: queryKeys.tatStats, queryFn: api.tatStats, enabled, retry: false });
+export const useUserStats = (enabled: boolean, days: number) =>
+  useQuery({
+    queryKey: queryKeys.userStats(days),
+    queryFn: () => api.userStats(days),
+    enabled,
+    retry: false,
+  });
+export const useReviewerGraph = (enabled: boolean) =>
+  useQuery({ queryKey: queryKeys.reviewerGraph, queryFn: api.reviewerGraph, enabled, retry: false });
+export const useCommentSourceStats = (enabled: boolean, days: number) =>
+  useQuery({
+    queryKey: queryKeys.commentSourceStats(days),
+    queryFn: () => api.commentSourceStats(days),
+    enabled,
+    retry: false,
+  });
 
 export const useSubmitNoteVerdict = (mrId: string) => {
   const qc = useQueryClient();

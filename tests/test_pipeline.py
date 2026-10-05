@@ -25,6 +25,24 @@ def test_scout_static_mentions_graphify_and_skill_tools():
     assert "read_module_skill" in SCOUT_STATIC
 
 
+def test_max_output_tokens_for_caps_only_the_groq_provider():
+    """Groq rejects max_tokens > 16384 on this model; every other provider
+    must keep getting an unbounded (None) cap, i.e. today's behaviour."""
+    from types import SimpleNamespace
+
+    from argus.llm.config import LLMConfig
+    from argus.review.pipeline import (GROQ_MAX_OUTPUT_TOKENS,
+                                           _max_output_tokens_for)
+
+    groq_deps = SimpleNamespace(llm_cfg=LLMConfig(
+        provider="groq", model="groq/qwen/qwen3.8-27b"))
+    ollama_deps = SimpleNamespace(llm_cfg=LLMConfig(
+        provider="ollama", model="openai/qwen3.8-27b", api_base="http://x/v1"))
+
+    assert _max_output_tokens_for(groq_deps) == GROQ_MAX_OUTPUT_TOKENS
+    assert _max_output_tokens_for(ollama_deps) is None
+
+
 @pytest.fixture
 def fake_stage(monkeypatch):
     calls = []
@@ -951,8 +969,18 @@ async def test_build_agent_tool_invokes_specialist_and_collects_findings(
         tool_ctx=ToolContext(workspace=tmp_path, files_by_id={}, hunks={}),
         profile_static="You are a reviewer.", mr_context="MR !1: t")
 
+    from argus.domain.models import (ReviewerAgent, ReviewerAgentVersion,
+                                         ReviewReviewerAgentVersion)
+    async with sf() as s:
+        ra = ReviewerAgent(name=f"security-{uuid.uuid4().hex[:8]}")
+        s.add(ra)
+        await s.flush()
+        rv = ReviewerAgentVersion(agent_id=ra.id, version=1, guidelines="g")
+        s.add(rv)
+        await s.commit()
+        version_id = rv.id
     agent = ResolvedAgent(name="security", guidelines="check for injection",
-                          max_rounds=7, version_id=uuid.uuid4())
+                          max_rounds=7, version_id=version_id)
 
     captured = {}
 
@@ -987,6 +1015,399 @@ async def test_build_agent_tool_invokes_specialist_and_collects_findings(
             ReviewStage.stage_name == "security:c1"))).scalar_one()
         assert stage.status == "done"
         assert stage.artifact["findings"][0]["title"] == "sql injection"
+        assert (await s.execute(select(ReviewReviewerAgentVersion).where(
+            ReviewReviewerAgentVersion.review_id == review_id,
+            ReviewReviewerAgentVersion.agent_version_id == version_id))).scalar_one()
+
+
+async def test_build_verify_delegate_tool_investigates_a_group_and_records_a_node(
+        db, engine, settings, tmp_path, monkeypatch):
+    """The delegate must run its own run_stage_agent loop over just the
+    findings it was handed, append its verdicts to `collected` (the safety net
+    verify falls back to), and record a "verify_delegate:<n>" ReviewStage so
+    pipelineGraph.ts renders it as its own node (its SPECIALIST_STAGE_RE
+    matches any non-"analyze:" "<name>:<suffix>" stage)."""
+    from argus.db import session_factory
+    from argus.llm.config import LLMConfig
+    from argus.review.pipeline import PipelineDeps, build_verify_delegate_tool
+    from argus.review.tools import ToolContext
+    from argus.domain.models import ReviewStage
+    from sqlalchemy import select
+
+    sf = session_factory(engine)
+    review_id = await _make_review(sf)
+    deps = PipelineDeps(
+        sf=sf, settings=settings,
+        llm_cfg=LLMConfig(provider="claude_cli_proxy", model="openai/x",
+                          api_base="http://x/v1", api_key="k"),
+        tool_ctx=ToolContext(workspace=tmp_path, files_by_id={}, hunks={}),
+        profile_static="You are a reviewer.", mr_context="MR !1: t")
+
+    findings_by_id = {
+        fid: CandidateFinding(
+            finding_id=fid, stage="analysis", type="issue", severity="high",
+            confidence=0.9, file_path="auth/x.py", line=3, title=f"t-{fid}",
+            body="details", evidence_quote="q = 1")
+        for fid in ("c1-a1", "c1-a2", "c1-a3")}
+
+    captured = {}
+
+    async def fake_run_stage_agent(model, tools, system_prompt, user_msg,
+                                   response_model, max_rounds, callbacks=None,
+                                   **_kwargs):
+        captured["system_prompt"] = system_prompt
+        captured["user_msg"] = user_msg
+        captured["max_rounds"] = max_rounds
+        return VerdictList(verdicts=[
+            Verdict(finding_id="c1-a1", valid=True, reason="quote confirmed"),
+            Verdict(finding_id="c1-a2", valid=False, reason="not in source")])
+
+    monkeypatch.setattr(stages, "run_stage_agent", fake_run_stage_agent)
+
+    collected = []
+    tool = build_verify_delegate_tool(
+        deps, str(review_id), findings_by_id,
+        lambda batch: "\n".join(f.finding_id for f in batch), [], collected)
+
+    result_json = await tool.ainvoke(
+        {"finding_ids": ["c1-a1", "c1-a2"],
+         "focus": "both sit in auth/x.py -- read it once and check both quotes"})
+
+    # Scoped to exactly the group it was given, not the whole review.
+    assert "c1-a1" in captured["user_msg"] and "c1-a2" in captured["user_msg"]
+    assert "c1-a3" not in captured["user_msg"]
+    assert "read it once and check both quotes" in captured["system_prompt"]
+    # Own round budget, scaled to the size of its own group (2), not the review.
+    assert captured["max_rounds"] == settings.verify_max_rounds * 2
+    assert [v.finding_id for v in collected] == ["c1-a1", "c1-a2"]
+    assert "quote confirmed" in result_json
+
+    async with sf() as s:
+        stage = (await s.execute(select(ReviewStage).where(
+            ReviewStage.review_id == review_id,
+            ReviewStage.stage_name == "verify_delegate:1"))).scalar_one()
+        assert stage.status == "done"
+        assert stage.artifact["finding_ids"] == ["c1-a1", "c1-a2"]
+        assert len(stage.artifact["verdicts"]) == 2
+
+
+async def test_verify_backfills_findings_the_orchestrator_never_ruled_on(
+        db, engine, settings, tmp_path, monkeypatch):
+    """A reasoning model that runs out of thinking mid-answer still emits a
+    well-formed but SHORT VerdictList, and every finding it silently omitted
+    used to reach publish with no verdict at all (i.e. was dropped). When a
+    delegate already investigated one of those findings, verify must fall back
+    to that assessment instead of losing it."""
+    from argus.db import session_factory
+    from argus.llm.config import LLMConfig
+    from argus.review.pipeline import PipelineDeps, run_review_pipeline
+    from argus.review.tools import ToolContext
+
+    sf = session_factory(engine)
+    review_id = await _make_review(sf)
+
+    fc = FileChange(file_id="f1", path="auth/x.py", change_kind="modified",
+                    language="python", hunk_ids=["h1"])
+    hunk = Hunk(hunk_id="h1", file_id="f1", old_start=1, old_lines=1,
+                new_start=1, new_lines=1, diff_text="@@ -1 +1 @@\n-a\n+b\n")
+    (tmp_path / "auth").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "auth" / "x.py").write_text("a = 0\nb = 0\nx = 1\n")
+
+    async def fake(model, tools, system_prompt, user_msg, response_model,
+                   max_rounds, callbacks=None, **_kwargs):
+        if response_model is ScoutOutput:
+            return ScoutOutput(intent="fix", mr_summary="s",
+                               file_summaries={"f1": "touches auth"})
+        if response_model is FindingList:
+            return FindingList(findings=[
+                CandidateFinding(
+                    finding_id="", stage="analysis", type="issue",
+                    severity="high", confidence=0.9, file_path="auth/x.py",
+                    line=1, title=f"finding {n}", body="details",
+                    evidence_quote="a = 0")
+                for n in (1, 2)])
+        if response_model is VerdictList:
+            if "delegated investigation" in system_prompt:
+                # The delegate assessed BOTH findings it was handed.
+                return VerdictList(verdicts=[
+                    Verdict(finding_id="c1-a1", valid=True, reason="delegate: ok"),
+                    Verdict(finding_id="c1-a2", valid=False, reason="delegate: no")])
+            # Orchestrator: delegate first (as its prompt tells it to), then
+            # run out of room and answer for only ONE of the two findings.
+            delegate = next(t for t in tools if t.name == "investigate_findings")
+            await delegate.ainvoke({"finding_ids": ["c1-a1", "c1-a2"],
+                                    "focus": "same file, check both"})
+            return VerdictList(verdicts=[
+                Verdict(finding_id="c1-a1", valid=True, reason="orchestrator call")])
+        raise AssertionError(response_model)
+
+    monkeypatch.setattr(stages, "run_stage_agent", fake)
+
+    deps = PipelineDeps(
+        sf=sf, settings=settings,
+        llm_cfg=LLMConfig(provider="claude_cli_proxy", model="openai/x",
+                          api_base="http://x/v1", api_key="k"),
+        tool_ctx=ToolContext(workspace=tmp_path, files_by_id={"f1": fc},
+                             hunks={"h1": hunk}),
+        profile_static="You are a reviewer.", mr_context="MR !1: t")
+
+    import argus.review.pipeline as pl
+
+    async def fake_publish(state, deps_):
+        from argus.review.artifacts import CompiledReview
+        return CompiledReview(published_finding_ids=[], summary_markdown="ok")
+    monkeypatch.setattr(pl, "publish_compiled_review", fake_publish)
+
+    state = await run_review_pipeline(review_id, deps, checkpointer=None)
+
+    by_id = {v.finding_id: v for v in state.verdicts}
+    # Both findings end up with a verdict, where previously c1-a2 was dropped.
+    assert set(by_id) == {"c1-a1", "c1-a2"}
+    # The orchestrator's own ruling wins where it gave one...
+    assert by_id["c1-a1"].reason == "orchestrator call"
+    # ...and the delegate's stands in only for the one it never answered.
+    assert by_id["c1-a2"].reason == "delegate: no"
+
+
+async def test_verify_flags_a_finding_no_one_ever_ruled_on(
+        db, engine, settings, tmp_path, monkeypatch):
+    """When the orchestrator neither answers a finding nor delegates it --
+    not an overflow, not a recursion limit, it just stops short -- a retry on
+    the leftover findings alone is the recovery path. If even that retry
+    still skips it, it must be dropped with a recorded complaint rather than
+    silently lost, since with no verdict it never reaches publish."""
+    from argus.db import session_factory
+    from argus.domain.models import AgentComplaint
+    from argus.llm.config import LLMConfig
+    from argus.review.pipeline import PipelineDeps, run_review_pipeline
+    from argus.review.tools import ToolContext
+
+    sf = session_factory(engine)
+    review_id = await _make_review(sf)
+
+    fc = FileChange(file_id="f1", path="auth/x.py", change_kind="modified",
+                    language="python", hunk_ids=["h1"])
+    hunk = Hunk(hunk_id="h1", file_id="f1", old_start=1, old_lines=1,
+                new_start=1, new_lines=1, diff_text="@@ -1 +1 @@\n-a\n+b\n")
+    (tmp_path / "auth").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "auth" / "x.py").write_text("a = 0\nb = 0\nx = 1\n")
+
+    calls = {"verify": 0}
+
+    async def fake(model, tools, system_prompt, user_msg, response_model,
+                   max_rounds, callbacks=None, **_kwargs):
+        if response_model is ScoutOutput:
+            return ScoutOutput(intent="fix", mr_summary="s",
+                               file_summaries={"f1": "touches auth"})
+        if response_model is FindingList:
+            return FindingList(findings=[
+                CandidateFinding(
+                    finding_id="", stage="analysis", type="issue",
+                    severity="critical" if n == 2 else "low",
+                    confidence=0.9, file_path="auth/x.py", line=1,
+                    title=f"finding {n}", body="details", evidence_quote="a = 0")
+                for n in (1, 2)])
+        if response_model is VerdictList:
+            calls["verify"] += 1
+            # Never delegates, never rules on c1-a2 -- not because of an
+            # overflow or a stuck loop, it just stops after the first one,
+            # on both the original batch and the retry of just c1-a2.
+            return VerdictList(verdicts=[
+                Verdict(finding_id="c1-a1", valid=True, reason="orchestrator call")])
+        raise AssertionError(response_model)
+
+    monkeypatch.setattr(stages, "run_stage_agent", fake)
+
+    deps = PipelineDeps(
+        sf=sf, settings=settings,
+        llm_cfg=LLMConfig(provider="claude_cli_proxy", model="openai/x",
+                          api_base="http://x/v1", api_key="k"),
+        tool_ctx=ToolContext(workspace=tmp_path, files_by_id={"f1": fc},
+                             hunks={"h1": hunk}),
+        profile_static="You are a reviewer.", mr_context="MR !1: t")
+
+    import argus.review.pipeline as pl
+
+    async def fake_publish(state, deps_):
+        from argus.review.artifacts import CompiledReview
+        return CompiledReview(published_finding_ids=[], summary_markdown="ok")
+    monkeypatch.setattr(pl, "publish_compiled_review", fake_publish)
+
+    state = await run_review_pipeline(review_id, deps, checkpointer=None)
+
+    # verify ran once on the full batch, then once more on just c1-a2.
+    assert calls["verify"] == 2
+    by_id = {v.finding_id: v for v in state.verdicts}
+    assert set(by_id) == {"c1-a1"}
+
+    async with sf() as s:
+        from sqlalchemy import select
+        complaints = (await s.execute(
+            select(AgentComplaint).where(AgentComplaint.review_id == review_id))).scalars().all()
+    critical = [c for c in complaints if c.target == "c1-a2"]
+    assert len(critical) == 1
+    assert critical[0].category == "task_impossible" and critical[0].blocked
+    assert "critical" in critical[0].detail
+
+
+async def test_verify_coverage_is_guaranteed_per_chunk_not_just_hoped_for(
+        db, engine, settings, tmp_path, monkeypatch):
+    """The structural fix: verify fans out one branch per chunk (Send, same
+    as analyze_chunk), so a model that answers incompletely in chunk c1's
+    branch cannot cost chunk c2's findings their verdicts -- each chunk's
+    coverage is now code-guaranteed the same way scout's specialist
+    delegation already was, not dependent on one giant free-form call
+    correctly enumerating everything it was given."""
+    from argus.db import session_factory
+    from argus.llm.config import LLMConfig
+    from argus.review.pipeline import PipelineDeps, run_review_pipeline
+    from argus.review.tools import ToolContext
+
+    sf = session_factory(engine)
+    review_id = await _make_review(sf)
+    scoped_settings = settings.model_copy(update={"max_chunk_files": 1})
+
+    fc1 = FileChange(file_id="f1", path="a/x.py", change_kind="modified",
+                     language="python", hunk_ids=["h1"])
+    fc2 = FileChange(file_id="f2", path="a/y.py", change_kind="modified",
+                     language="python", hunk_ids=["h2"])
+    hunk1 = Hunk(hunk_id="h1", file_id="f1", old_start=1, old_lines=1,
+                new_start=1, new_lines=1, diff_text="@@ -1 +1 @@\n-a\n+b\n")
+    hunk2 = Hunk(hunk_id="h2", file_id="f2", old_start=1, old_lines=1,
+                new_start=1, new_lines=1, diff_text="@@ -1 +1 @@\n-c\n+d\n")
+    (tmp_path / "a").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "a" / "x.py").write_text("a = 0\nb = 0\nx = 1\n")
+    (tmp_path / "a" / "y.py").write_text("c = 0\nd = 0\ny = 1\n")
+
+    verify_calls: list[str] = []
+
+    async def fake(model, tools, system_prompt, user_msg, response_model,
+                   max_rounds, callbacks=None, metadata=None, **_kwargs):
+        if response_model is ScoutOutput:
+            return ScoutOutput(intent="fix", mr_summary="s",
+                               file_summaries={"f1": "x", "f2": "y"})
+        if response_model is FindingList:
+            fid = "f1" if "x.py" in user_msg else "f2"
+            return FindingList(findings=[CandidateFinding(
+                finding_id="", stage="analysis", type="issue", severity="high",
+                confidence=0.9, file_path=f"a/{'x' if fid == 'f1' else 'y'}.py",
+                line=1, title=f"bug in {fid}", body="d", evidence_quote="a = 0")])
+        if response_model is VerdictList:
+            stage = (metadata or {}).get("stage_name", "")
+            verify_calls.append(stage)
+            # Both chunk branches make the SAME mistake -- answer for
+            # nothing. If coverage relied on one branch happening to
+            # succeed, this would prove nothing; each chunk's own retry
+            # must independently recover, or neither is proven.
+            return VerdictList(verdicts=[])
+        raise AssertionError(response_model)
+
+    monkeypatch.setattr(stages, "run_stage_agent", fake)
+
+    deps = PipelineDeps(
+        sf=sf, settings=scoped_settings,
+        llm_cfg=LLMConfig(provider="claude_cli_proxy", model="openai/x",
+                          api_base="http://x/v1", api_key="k"),
+        tool_ctx=ToolContext(workspace=tmp_path, files_by_id={"f1": fc1, "f2": fc2},
+                             hunks={"h1": hunk1, "h2": hunk2}),
+        profile_static="You are a reviewer.", mr_context="MR !1: t")
+
+    import argus.review.pipeline as pl
+
+    async def fake_publish(state, deps_):
+        from argus.review.artifacts import CompiledReview
+        return CompiledReview(published_finding_ids=[], summary_markdown="ok")
+    monkeypatch.setattr(pl, "publish_compiled_review", fake_publish)
+
+    state = await run_review_pipeline(review_id, deps, checkpointer=None)
+
+    # Both chunks got their own branch, and each ran the batch then its own
+    # retry independently -- 4 calls total, not 1 giant call for both files.
+    assert sorted(verify_calls) == ["verify:c1", "verify:c1", "verify:c2", "verify:c2"]
+
+    async with sf() as s:
+        from sqlalchemy import select
+
+        from argus.domain.models import AgentComplaint
+        complaints = (await s.execute(
+            select(AgentComplaint).where(AgentComplaint.review_id == review_id))).scalars().all()
+    flagged_targets = {c.target for c in complaints if c.category == "task_impossible"}
+    # Neither chunk's coverage gap silently swallowed the other's finding.
+    assert flagged_targets == {"c1-a1", "c2-a1"}
+
+
+async def test_each_analyze_chunk_and_verify_branch_records_its_own_stage(
+        db, engine, settings, tmp_path, monkeypatch):
+    """The graph can only mark a chunk or verify branch finished while its
+    siblings still run if each writes its own row -- the aggregate analyze
+    and verify rows only land once every branch is done."""
+    from sqlalchemy import select
+
+    from argus.db import session_factory
+    from argus.domain.models import ReviewStage
+    from argus.llm.config import LLMConfig
+    from argus.review.pipeline import PipelineDeps, run_review_pipeline
+    from argus.review.artifacts import Verdict
+    from argus.review.tools import ToolContext
+
+    sf = session_factory(engine)
+    review_id = await _make_review(sf)
+    scoped_settings = settings.model_copy(update={"max_chunk_files": 1})
+
+    fc1 = FileChange(file_id="f1", path="a/x.py", change_kind="modified",
+                     language="python", hunk_ids=["h1"])
+    fc2 = FileChange(file_id="f2", path="a/y.py", change_kind="modified",
+                     language="python", hunk_ids=["h2"])
+    hunk1 = Hunk(hunk_id="h1", file_id="f1", old_start=1, old_lines=1,
+                new_start=1, new_lines=1, diff_text="@@ -1 +1 @@\n-a\n+b\n")
+    hunk2 = Hunk(hunk_id="h2", file_id="f2", old_start=1, old_lines=1,
+                new_start=1, new_lines=1, diff_text="@@ -1 +1 @@\n-c\n+d\n")
+    (tmp_path / "a").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "a" / "x.py").write_text("a = 0\nb = 0\nx = 1\n")
+    (tmp_path / "a" / "y.py").write_text("c = 0\nd = 0\ny = 1\n")
+
+    async def fake(model, tools, system_prompt, user_msg, response_model,
+                   max_rounds, callbacks=None, metadata=None, **_kwargs):
+        if response_model is ScoutOutput:
+            return ScoutOutput(intent="fix", mr_summary="s",
+                               file_summaries={"f1": "x", "f2": "y"})
+        if response_model is FindingList:
+            fid = "f1" if "x.py" in user_msg else "f2"
+            return FindingList(findings=[CandidateFinding(
+                finding_id="", stage="analysis", type="issue", severity="high",
+                confidence=0.9, file_path=f"a/{'x' if fid == 'f1' else 'y'}.py",
+                line=1, title=f"bug in {fid}", body="d", evidence_quote="a = 0")])
+        if response_model is VerdictList:
+            chunk = (metadata or {}).get("stage_name", "").split(":")[-1]
+            return VerdictList(verdicts=[Verdict(finding_id=f"{chunk}-a1",
+                                                 valid=True, reason="ok")])
+        raise AssertionError(response_model)
+
+    monkeypatch.setattr(stages, "run_stage_agent", fake)
+    deps = PipelineDeps(
+        sf=sf, settings=scoped_settings,
+        llm_cfg=LLMConfig(provider="claude_cli_proxy", model="openai/x",
+                          api_base="http://x/v1", api_key="k"),
+        tool_ctx=ToolContext(workspace=tmp_path, files_by_id={"f1": fc1, "f2": fc2},
+                             hunks={"h1": hunk1, "h2": hunk2}),
+        profile_static="You are a reviewer.", mr_context="MR !1: t")
+
+    import argus.review.pipeline as pl
+
+    async def fake_publish(state, deps_):
+        from argus.review.artifacts import CompiledReview
+        return CompiledReview(published_finding_ids=[], summary_markdown="ok")
+    monkeypatch.setattr(pl, "publish_compiled_review", fake_publish)
+
+    await run_review_pipeline(review_id, deps, checkpointer=None)
+
+    async with sf() as s:
+        rows = {r.stage_name: r for r in (await s.execute(
+            select(ReviewStage).where(ReviewStage.review_id == review_id))).scalars()}
+    for name in ("analyze:c1", "analyze:c2", "verify:c1", "verify:c2"):
+        assert rows[name].status == "done", name
+    assert len(rows["analyze:c1"].artifact["findings"]) == 1
+    assert [v["finding_id"] for v in rows["verify:c2"].artifact["verdicts"]] == ["c2-a1"]
 
 
 async def test_build_agent_tool_returns_empty_on_unrecoverable_error(
@@ -1377,3 +1798,186 @@ async def test_qa_scenarios_mode_publishes_checklist_only_comment(
     assert "## argus QA scenarios" in gitlab.calls[0]
     assert "Login with valid credentials" in gitlab.calls[0]
     assert "inline comment" not in gitlab.calls[0]
+
+
+async def test_build_agent_tool_description_names_the_specialist(
+        db, engine, settings, tmp_path):
+    from argus.db import session_factory
+    from argus.llm.config import LLMConfig
+    from argus.review.pipeline import ResolvedAgent, PipelineDeps, build_agent_tool
+    from argus.review.tools import ToolContext
+
+    sf = session_factory(engine)
+    deps = PipelineDeps(
+        sf=sf, settings=settings,
+        llm_cfg=LLMConfig(provider="claude_cli_proxy", model="openai/x",
+                          api_base="http://x/v1", api_key="k"),
+        tool_ctx=ToolContext(workspace=tmp_path, files_by_id={}, hunks={}),
+        profile_static="p", mr_context="m")
+    agent = ResolvedAgent(name="security", guidelines="g",
+                          description="Finds injection and authz bugs",
+                          max_rounds=3, version_id=uuid.uuid4())
+    t = build_agent_tool(deps, str(uuid.uuid4()), agent, "c1", [], [])
+    assert "{agent.name}" not in t.description
+    assert "security" in t.description
+    assert "Finds injection and authz bugs" in t.description
+
+
+async def test_pipeline_does_not_resume_a_checkpoint_from_another_head_sha(
+        db, engine, settings, tmp_path, fake_stage, monkeypatch, pg_checkpointer):
+    from argus.db import session_factory
+    from argus.review.pipeline import run_review_pipeline
+    import argus.review.pipeline as pl
+
+    sf = session_factory(engine)
+    review_id = await _make_review(sf)
+    deps = await _make_deps(sf, settings, tmp_path)
+
+    async def fake_publish(state, deps_):
+        from argus.review.artifacts import CompiledReview
+        return CompiledReview(published_finding_ids=[], summary_markdown="ok")
+    monkeypatch.setattr(pl, "publish_compiled_review", fake_publish)
+
+    deps.diff_refs = {"head_sha": "a" * 40}
+    await run_review_pipeline(review_id, deps, checkpointer=pg_checkpointer)
+    first = len(fake_stage)
+
+    deps.diff_refs = {"head_sha": "b" * 40}
+    await run_review_pipeline(review_id, deps, checkpointer=pg_checkpointer)
+    assert len(fake_stage) > first, "a new head sha must start a fresh run"
+
+
+def test_checkpoint_thread_id_is_the_bare_review_id_without_a_sha():
+    from argus.review.pipeline import checkpoint_thread_id
+    rid = uuid.uuid4()
+    assert checkpoint_thread_id(rid, "") == str(rid)
+    assert checkpoint_thread_id(rid, "abcdef0123456789") == f"{rid}@abcdef012345"
+
+
+def test_restrict_to_agent_applies_the_agents_own_allowlist():
+    from types import SimpleNamespace
+    from argus.review.pipeline import restrict_to_agent
+    tools = [SimpleNamespace(name=n) for n in
+             ("get_file_lines", "upsert_learning_tool", "search_code",
+              "generate_test_scenario")]
+    kept = {t.name for t in restrict_to_agent(tools, ["get_file_lines"])}
+    assert kept == {"get_file_lines", "search_code", "generate_test_scenario"}
+    assert restrict_to_agent(tools, None) == tools
+
+
+async def test_build_agent_tool_hands_the_specialist_only_its_allowed_tools(
+        db, engine, settings, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from argus.db import session_factory
+    from argus.domain.models import ReviewerAgent, ReviewerAgentVersion
+    from argus.llm.config import LLMConfig
+    from argus.review.pipeline import ResolvedAgent, PipelineDeps, build_agent_tool
+    from argus.review.tools import ToolContext
+
+    sf = session_factory(engine)
+    review_id = await _make_review(sf)
+    async with sf() as s:
+        ra = ReviewerAgent(name=f"sec-{uuid.uuid4().hex[:8]}")
+        s.add(ra)
+        await s.flush()
+        rv = ReviewerAgentVersion(agent_id=ra.id, version=1, guidelines="g")
+        s.add(rv)
+        await s.commit()
+        version_id = rv.id
+    deps = PipelineDeps(
+        sf=sf, settings=settings,
+        llm_cfg=LLMConfig(provider="claude_cli_proxy", model="openai/x",
+                          api_base="http://x/v1", api_key="k"),
+        tool_ctx=ToolContext(workspace=tmp_path, files_by_id={}, hunks={}),
+        profile_static="p", mr_context="m")
+    seen = {}
+
+    async def fake(model, tools, *a, **k):
+        seen["names"] = {t.name for t in tools}
+        return FindingList(findings=[])
+    monkeypatch.setattr(stages, "run_stage_agent", fake)
+
+    agent = ResolvedAgent(name="sec", guidelines="g", max_rounds=3,
+                          version_id=version_id, tool_allowlist=["get_file_lines"])
+    tools = [SimpleNamespace(name=n) for n in ("get_file_lines", "upsert_learning_tool")]
+    await build_agent_tool(deps, str(review_id), agent, "c1", tools, []).ainvoke(
+        {"chunk_context": "x"})
+    assert seen["names"] == {"get_file_lines"}
+
+
+async def test_pipeline_with_no_reviewable_chunks_still_publishes(
+        db, engine, settings, tmp_path, fake_stage, monkeypatch):
+    from argus.db import session_factory
+    from argus.llm.config import LLMConfig
+    from argus.review.pipeline import PipelineDeps, run_review_pipeline
+    from argus.review.tools import ToolContext
+    import argus.review.pipeline as pl
+
+    sf = session_factory(engine)
+    review_id = await _make_review(sf)
+    deps = PipelineDeps(
+        sf=sf, settings=settings,
+        llm_cfg=LLMConfig(provider="claude_cli_proxy", model="openai/x",
+                          api_base="http://x/v1", api_key="k"),
+        tool_ctx=ToolContext(workspace=tmp_path, files_by_id={}, hunks={}),
+        profile_static="p", mr_context="m")
+
+    async def fake_publish(state, deps_):
+        from argus.review.artifacts import CompiledReview
+        return CompiledReview(published_finding_ids=[], summary_markdown="empty")
+    monkeypatch.setattr(pl, "publish_compiled_review", fake_publish)
+
+    state = await run_review_pipeline(review_id, deps, checkpointer=None)
+    assert state.compiled and state.compiled.summary_markdown == "empty"
+
+
+async def test_pipeline_restarts_a_legacy_checkpoint_with_unknown_head(
+        db, engine, settings, tmp_path, fake_stage, monkeypatch, pg_checkpointer):
+    """Unknown legacy heads cannot safely resume findings against a new commit."""
+    from argus.db import session_factory
+    from argus.review.pipeline import run_review_pipeline
+    import argus.review.pipeline as pl
+
+    sf = session_factory(engine)
+    review_id = await _make_review(sf)
+    deps = await _make_deps(sf, settings, tmp_path)
+
+    async def fake_publish(state, deps_):
+        from argus.review.artifacts import CompiledReview
+        return CompiledReview(published_finding_ids=[], summary_markdown="ok")
+    monkeypatch.setattr(pl, "publish_compiled_review", fake_publish)
+
+    deps.diff_refs = {}
+    await run_review_pipeline(review_id, deps, checkpointer=pg_checkpointer)
+    first = len(fake_stage)
+
+    deps.diff_refs = {"head_sha": "c" * 40}
+    state = await run_review_pipeline(review_id, deps, checkpointer=pg_checkpointer)
+    assert len(fake_stage) > first
+    assert state.compiled and state.compiled.summary_markdown == "ok"
+
+
+async def test_qa_mode_with_no_reviewable_chunks_still_publishes(
+        db, engine, settings, tmp_path, fake_stage, monkeypatch):
+    from argus.db import session_factory
+    from argus.llm.config import LLMConfig
+    from argus.review.pipeline import PipelineDeps, run_review_pipeline
+    from argus.review.tools import ToolContext
+    import argus.review.pipeline as pl
+
+    sf = session_factory(engine)
+    review_id = await _make_review(sf)
+    deps = PipelineDeps(
+        sf=sf, settings=settings,
+        llm_cfg=LLMConfig(provider="claude_cli_proxy", model="openai/x",
+                          api_base="http://x/v1", api_key="k"),
+        tool_ctx=ToolContext(workspace=tmp_path, files_by_id={}, hunks={}),
+        profile_static="p", mr_context="m", review_mode="qa_scenarios")
+
+    async def fake_publish(state, deps_):
+        from argus.review.artifacts import CompiledReview
+        return CompiledReview(published_finding_ids=[], summary_markdown="empty-qa")
+    monkeypatch.setattr(pl, "publish_compiled_review", fake_publish)
+
+    state = await run_review_pipeline(review_id, deps, checkpointer=None)
+    assert state.compiled and state.compiled.summary_markdown == "empty-qa"

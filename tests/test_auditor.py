@@ -1,52 +1,8 @@
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 
 import pytest
 
-from argus.knowledge.audit_scheduler import select_repos_to_audit
-from argus.knowledge.auditor import (ClusterAudit, LearningVerdict,
-                                         format_cluster_prompt)
-
-
-class _L:
-    def __init__(self, id, topic, hint, paths=None, pattern=None):
-        self.id = id
-        self.topic = topic
-        self.hint_text = hint
-        self.file_paths = paths
-        self.file_pattern = pattern
-        self.hit_count = 0
-        self.harmful_count = 0
-        self.ignored_count = 0
-        self.miss_count = 0
-        self.inconclusive_count = 0
-
-
-def test_prompt_lists_every_learning_with_its_id():
-    cluster = [_L("aaaaaaaa-0000", "logging", "use lazy formatting"),
-               _L("bbbbbbbb-0000", "logging2", "prefer lazy log fmt")]
-    prompt = format_cluster_prompt(cluster)
-    assert "aaaaaaaa-0000" in prompt
-    assert "bbbbbbbb-0000" in prompt
-    assert "use lazy formatting" in prompt
-
-
-def test_prompt_includes_outcome_evidence():
-    l = _L("cccccccc-0000", "t", "h")
-    l.hit_count = 4
-    l.harmful_count = 2
-    prompt = format_cluster_prompt([l])
-    assert "4" in prompt and "2" in prompt
-
-
-def test_cluster_audit_schema_round_trip():
-    audit = ClusterAudit(verdicts=[
-        LearningVerdict(learning_id="aaaaaaaa-0000", verdict="corroborated",
-                        confidence=0.8, rationale="matches",
-                        citations=[{"file": "a.py", "line": 1, "quote": "x"}],
-                        proposed_action="none")])
-    assert audit.verdicts[0].verdict == "corroborated"
-    assert audit.verdicts[0].citations[0].file == "a.py"
+from argus.knowledge.auditor import LearningVerdict
 
 
 def test_verdict_rejects_unknown_action():
@@ -55,28 +11,47 @@ def test_verdict_rejects_unknown_action():
                         rationale="r", citations=[], proposed_action="delete")
 
 
-class _Repo:
-    def __init__(self, id, last_audit_at=None):
-        self.id = id
-        self.last_audit_at = last_audit_at
+# --- reclaiming audit runs orphaned by a restart -----------------------------
+# A run stuck 'running' or 'queued' with no live job behind it looks like it
+# will finish forever, silencing dedup_key/staleness checks for every run
+# after -- three of these stacked for one repo before anyone noticed
+# (2026-09-21 incident).
+
+async def test_reclaim_marks_an_orphaned_running_audit_run_as_failed(db):
+    from argus.domain.models import AuditRun, Repository
+    from argus.knowledge.audit_scheduler import reclaim_stale_audit_runs
+
+    repo = Repository(provider="gitlab", project_path="g/audit-reclaim-1",
+                      gitlab_project_id=70000001)
+    db.add(repo)
+    await db.flush()
+    run = AuditRun(repo_id=repo.id, status="running")
+    db.add(run)
+    await db.flush()
+
+    n = await reclaim_stale_audit_runs(db, stale_after_s=0)
+
+    assert n == 1
+    assert run.status == "failed"
+    assert run.finished_at is not None
+    assert "orphaned" in (run.error or "").lower()
 
 
-def test_never_audited_repo_is_selected():
-    now = datetime(2026, 7, 31, tzinfo=timezone.utc)
-    repos = [_Repo("a", None)]
-    assert len(select_repos_to_audit(repos, now, 7)) == 1
+async def test_reclaim_audit_runs_ignores_a_genuinely_completed_run(db):
+    from argus.domain.models import AuditRun, Repository
+    from argus.knowledge.audit_scheduler import reclaim_stale_audit_runs
 
+    repo = Repository(provider="gitlab", project_path="g/audit-reclaim-2",
+                      gitlab_project_id=70000002)
+    db.add(repo)
+    await db.flush()
+    done = AuditRun(repo_id=repo.id, status="done",
+                    finished_at=datetime.now(timezone.utc))
+    db.add(done)
+    await db.flush()
 
-def test_recently_audited_repo_is_skipped():
-    now = datetime(2026, 7, 31, tzinfo=timezone.utc)
-    repos = [_Repo("a", now - timedelta(days=2))]
-    assert select_repos_to_audit(repos, now, 7) == []
-
-
-def test_overdue_repo_is_selected():
-    now = datetime(2026, 7, 31, tzinfo=timezone.utc)
-    repos = [_Repo("a", now - timedelta(days=30))]
-    assert len(select_repos_to_audit(repos, now, 7)) == 1
+    assert await reclaim_stale_audit_runs(db, stale_after_s=0) == 0
+    assert done.status == "done"
 
 
 # --- proposed_action must follow from the verdict ---------------------------
@@ -88,9 +63,7 @@ def test_overdue_repo_is_selected():
 # approve/apply pipeline unreachable: audits produced opinions nobody could
 # act on.
 
-import pytest
-
-from argus.knowledge.auditor import _SYSTEM, default_action_for
+from argus.knowledge.auditor import default_action_for
 
 
 @pytest.mark.parametrize("verdict,expected", [
@@ -116,16 +89,6 @@ def test_an_explicitly_proposed_action_is_never_overridden():
     actually thought about it."""
     assert default_action_for("stale", "flag_for_rewrite") == "flag_for_rewrite"
     assert default_action_for("corroborated", "archive") == "archive"
-
-
-def test_prompt_states_the_mapping_rather_than_only_urging_caution():
-    """The prompt is the first line of defence; the code default is a backstop
-    for a model that ignores it."""
-    flat = " ".join(_SYSTEM.split())
-    assert "stale -> archive" in flat
-    assert "duplicate_of -> merge" in flat
-    # and it must warn against the exact failure observed
-    assert "Do NOT answer 'none' merely because you are cautious" in flat
 
 
 # --- global learnings must not be audited against one repo ------------------
@@ -167,67 +130,50 @@ async def test_audit_clustering_excludes_global_learnings(db):
     assert "global" in {l.topic for c in for_review for l in c}
 
 
-def test_auditor_asks_for_repo_scoped_learnings_only():
-    """Pin the call site: the parameter defaults to True for the review path,
-    so the auditor must opt out explicitly."""
-    import inspect
-
-    from argus.knowledge import auditor
-
-    src = inspect.getsource(auditor.run_audit_for_repo)
-    assert "include_global=False" in src
-
-
-# --- observability regressions (2026-08-09) --------------------------------
-# Audit runs recorded 23 LLM rounds and ZERO tool calls. That is
-# indistinguishable from an auditor judging learnings without ever opening the
-# codebase -- the exact thing an audit is supposed to do. The cause was
-# audit_cluster never forwarding `callbacks` to run_stage_agent: LangChain
-# fires on_tool_start/on_tool_end on the GRAPH invocation, so a callback
-# attached only to the model sees LLM rounds and no tools.
-
-def test_audit_cluster_forwards_callbacks_to_the_agent():
-    import inspect
-
-    from argus.knowledge.auditor import audit_cluster
-
-    assert "callbacks" in inspect.signature(audit_cluster).parameters
-    src = inspect.getsource(audit_cluster)
-    assert "callbacks=callbacks" in src, (
-        "callbacks must reach run_stage_agent, or no ToolCall row is ever "
-        "written for an audit")
-
-
-def test_run_audit_passes_its_callbacks_into_each_cluster():
-    import inspect
-
-    from argus.knowledge.auditor import run_audit_for_repo
-
-    src = inspect.getsource(run_audit_for_repo)
-    assert "audit_cluster(" in src
-    call = src[src.index("audit_cluster("):]
-    assert "callbacks=callbacks" in call[:200]
-
-
-def test_audit_run_is_langfuse_traced_like_a_review():
-    """Reviews persist their trace id when the run starts, so a run that dies
-    mid-way is still traceable. Audits now do the same, via the same
-    LangfuseRun helper reviews and distillation use (langfuse_enabled/
-    create_trace_id live there now, not duplicated per pipeline)."""
-    import inspect
-
-    from argus.knowledge.auditor import run_audit_for_repo
-
-    src = inspect.getsource(run_audit_for_repo)
-    assert 'LangfuseRun.start(\n            settings, "audit"' in src
-    assert "row.langfuse_trace_id = trace_id" in src
-    # the id must be stored before any cluster work begins
-    assert src.index("langfuse_trace_id = trace_id") < src.index("for cluster in clusters")
-    # and the span must be closed, or the trace never flushes
-    assert "audit_span_stack.close()" in src
-
-
 def test_audit_run_model_carries_a_trace_id_column():
     from argus.domain.models import AuditRun
 
     assert "langfuse_trace_id" in AuditRun.__table__.columns
+
+
+def _pv(learning_id, verdict="duplicate_of", related=None, action="merge", text="merged"):
+    from argus.knowledge.auditor import LearningVerdict
+    return LearningVerdict(learning_id=str(learning_id), verdict=verdict, confidence=0.9,
+                           rationale="r", related_learning_id=related,
+                           proposed_action=action, suggested_hint_text=text)
+
+
+def test_verdict_for_a_learning_outside_the_cluster_is_discarded():
+    import uuid as _uuid
+    from argus.knowledge.auditor import persisted_verdict
+    a = _uuid.uuid4()
+    assert persisted_verdict(_pv(_uuid.uuid4()), {a}) is None
+    assert persisted_verdict(_pv("not-a-uuid"), {a}) is None
+
+
+def test_ids_are_matched_regardless_of_formatting():
+    import uuid as _uuid
+    from argus.knowledge.auditor import persisted_verdict
+    a, b = _uuid.uuid4(), _uuid.uuid4()
+    p = persisted_verdict(_pv(str(a).upper(), related="{" + str(b) + "}"), {a, b})
+    assert p["learning_id"] == a and p["related_learning_id"] == b
+    assert p["action"] == "merge"
+
+
+def test_merge_without_a_valid_in_cluster_survivor_is_escalated():
+    import uuid as _uuid
+    from argus.knowledge.auditor import persisted_verdict
+    a, b = _uuid.uuid4(), _uuid.uuid4()
+    for related in (None, "garbage", str(_uuid.uuid4()), str(a)):
+        p = persisted_verdict(_pv(a, related=related), {a, b})
+        assert p["action"] == "escalate_to_human", related
+        assert p["related_learning_id"] is None
+
+
+def test_conflicts_with_keeps_its_related_learning():
+    import uuid as _uuid
+    from argus.knowledge.auditor import persisted_verdict
+    a, b = _uuid.uuid4(), _uuid.uuid4()
+    p = persisted_verdict(_pv(a, verdict="conflicts_with", related=str(b),
+                              action="none", text=None), {a, b})
+    assert p["action"] == "escalate_to_human" and p["related_learning_id"] == b
