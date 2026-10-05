@@ -4,26 +4,17 @@ import { Search } from "lucide-react";
 import { useLearnings, useLearningsSearch, useRepositories } from "../../api/queries";
 import type { Learning } from "../../api/types";
 import ErrorBox from "../../components/ErrorBox";
+import FilterBuilder from "../../components/FilterBuilder";
 import PaginationBar from "../../components/PaginationBar";
+import { buildQueryParams, newConditionId, type Condition } from "../../components/filterConditions";
+import { learningsFilterFields } from "./learningsFilterFields";
 
-type KindFilter = "all" | "guidance" | "do_not_suggest" | "missed_pattern";
-type ScopeFilter = "all" | "global" | "repo";
-type StatusFilter = "all" | "active" | "archived";
-type PerfFilter = "all" | "performing" | "underperforming" | "no-data";
-
-function matchesPerf(l: Learning, f: PerfFilter): boolean {
-  if (f === "all") return true;
-  if (f === "no-data") return l.hit_rate === null;
-  if (l.hit_rate === null) return false;
-  return f === "performing" ? l.hit_rate >= 0.5 : l.hit_rate < 0.5;
-}
+const DEFAULT_CONDITIONS: Condition[] = [
+  { id: newConditionId(), field: "status", operator: "is", value: "active" },
+];
 
 function fmtPct(rate: number | null): string {
   return rate === null ? "no verdicts yet" : `${Math.round(rate * 100)}% hit rate`;
-}
-
-function needsAttention(l: Learning): boolean {
-  return (l.groundedness !== null && l.groundedness < 0.4) || l.harmful_count > 0;
 }
 
 function isTrueButUnused(l: Learning): boolean {
@@ -43,30 +34,39 @@ function groundedClass(groundedness: number): string {
 }
 
 export default function LearningsTab() {
-  const [kind, setKind] = useState<KindFilter>("all");
-  const [scope, setScope] = useState<ScopeFilter>("all");
-  const [status, setStatus] = useState<StatusFilter>("active");
-  const [perf, setPerf] = useState<PerfFilter>("all");
-  const [attentionOnly, setAttentionOnly] = useState(false);
+  // Draft state is what the user is editing; applied state is what the query
+  // hooks actually use. Nothing fetches until Search is submitted.
+  const [draftConditions, setDraftConditions] = useState<Condition[]>(DEFAULT_CONDITIONS);
+  const [appliedConditions, setAppliedConditions] = useState<Condition[]>(DEFAULT_CONDITIONS);
+  const [draftQuery, setDraftQuery] = useState("");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(20);
   const repos = useRepositories(1, 200);
 
-  const filters = useMemo(() => {
-    const f: { kind?: string; status?: string; page?: number; per_page?: number } = {
-      page,
-      per_page: perPage,
-    };
-    if (kind !== "all") f.kind = kind;
-    if (status !== "all") f.status = status;
-    return f;
-  }, [kind, status, page, perPage]);
+  const fields = useMemo(
+    () =>
+      learningsFilterFields(
+        (repos.data?.items ?? []).map((r) => ({ value: r.id, label: r.project_path })),
+      ),
+    [repos.data],
+  );
 
-  const listResult = useLearnings(filters);
-  const searchResult = useLearningsSearch(query, {});
+  const conditionParams = useMemo(
+    () => buildQueryParams(fields, appliedConditions),
+    [fields, appliedConditions],
+  );
+
+  const listResult = useLearnings({ ...conditionParams, page, per_page: perPage });
+  const searchResult = useLearningsSearch(query, { ...conditionParams, page, per_page: perPage });
   const searching = query.trim().length > 0;
   const active = searching ? searchResult : listResult;
+
+  function applyFilters() {
+    setAppliedConditions(draftConditions);
+    setQuery(draftQuery);
+    setPage(1);
+  }
 
   const repoNameById = useMemo(() => {
     const map = new Map<string, string>();
@@ -74,99 +74,45 @@ export default function LearningsTab() {
     return map;
   }, [repos.data]);
 
-  const displayed = (active.data?.items ?? []).filter((l) => {
-    if (scope === "global" && l.repo_id !== null) return false;
-    if (scope === "repo" && l.repo_id === null) return false;
-    if (attentionOnly && !needsAttention(l)) return false;
-    return matchesPerf(l, perf);
-  });
+  const items = active.data?.items ?? [];
 
   return (
     <div>
-      <div className="search-row">
-        <Search size={15} />
-        <input
-          placeholder="Semantic search across learnings — e.g. how do we handle retries?"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-      </div>
-
-      {!searching && (
-        <div className="row" style={{ gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
-          {(["all", "guidance", "do_not_suggest", "missed_pattern"] as const).map((k) => (
-            <button
-              key={k}
-              className={`chip${kind === k ? " on" : ""}`}
-              onClick={() => {
-                setKind(k);
-                setPage(1);
-              }}
-            >
-              {k === "all"
-                ? "All kinds"
-                : k === "guidance"
-                  ? "Guidance"
-                  : k === "do_not_suggest"
-                    ? "Do-not-suggest"
-                    : "Missed pattern"}
-            </button>
-          ))}
-          <span className="chip-divider" />
-          {(["all", "global", "repo"] as const).map((s) => (
-            <button
-              key={s}
-              className={`chip${scope === s ? " on" : ""}`}
-              onClick={() => setScope(s)}
-            >
-              {s === "all" ? "All scopes" : s === "global" ? "Global" : "Repo-specific"}
-            </button>
-          ))}
-          <span className="chip-divider" />
-          {(["active", "archived", "all"] as const).map((s) => (
-            <button
-              key={s}
-              className={`chip${status === s ? " on" : ""}`}
-              onClick={() => {
-                setStatus(s);
-                setPage(1);
-              }}
-            >
-              {s === "all" ? "All statuses" : s === "active" ? "Active" : "Archived"}
-            </button>
-          ))}
-          <span className="chip-divider" />
-          {(["all", "performing", "underperforming", "no-data"] as const).map((p) => (
-            <button key={p} className={`chip${perf === p ? " on" : ""}`} onClick={() => setPerf(p)}>
-              {p === "all"
-                ? "Any performance"
-                : p === "performing"
-                  ? "Performing well"
-                  : p === "underperforming"
-                    ? "Underperforming"
-                    : "No verdicts yet"}
-            </button>
-          ))}
-          <span className="chip-divider" />
-          <button
-            className={`chip${attentionOnly ? " on" : ""}`}
-            onClick={() => setAttentionOnly((v) => !v)}
-          >
-            Needs attention
-          </button>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          applyFilters();
+        }}
+      >
+        <div className="search-row">
+          <Search size={15} />
+          <input
+            placeholder="Semantic search across learnings — e.g. how do we handle retries?"
+            value={draftQuery}
+            onChange={(e) => setDraftQuery(e.target.value)}
+          />
         </div>
-      )}
+
+        <div className="ui-card" style={{ marginBottom: 14, marginTop: 12 }}>
+          <FilterBuilder fields={fields} conditions={draftConditions} onChange={setDraftConditions} />
+          <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
+            <button type="submit" className="btn-p">
+              Search
+            </button>
+          </div>
+        </div>
+      </form>
 
       {active.isPending && <div className="spinner">Loading learnings…</div>}
       {active.error && <ErrorBox message={active.error.message} onRetry={active.refetch} />}
 
-      {active.data && displayed.length === 0 && (
+      {active.data && items.length === 0 && (
         <div className="ui-card" style={{ padding: 24, textAlign: "center" }}>
           <p className="muted">No learnings match these filters.</p>
         </div>
       )}
 
-      {displayed.map((l) => (
+      {items.map((l) => (
         <div className="ui-card learning-card" key={l.id}>
           <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
             <b>{l.topic}</b>
@@ -244,11 +190,11 @@ export default function LearningsTab() {
         </div>
       ))}
 
-      {!searching && listResult.data && (
+      {active.data && (
         <PaginationBar
-          page={listResult.data.page}
-          perPage={listResult.data.per_page}
-          total={listResult.data.total}
+          page={active.data.page}
+          perPage={active.data.per_page}
+          total={active.data.total}
           onPageChange={setPage}
           onPerPageChange={(n) => {
             setPerPage(n);

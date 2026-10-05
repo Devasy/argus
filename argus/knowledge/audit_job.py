@@ -66,7 +66,9 @@ async def run_audit_job(sf, settings, payload: dict, endpoint_name: str | None) 
             repo = await s.get(Repository, run.repo_id)
             run.status = "running"
             run.started_at = run.started_at or datetime.now(timezone.utc)
-            ref = await resolve_audit_ref(s, repo)
+            # A resumed checkpoint belongs to the original checkout, even if
+            # its branch moved while the worker was offline.
+            ref = run.commit_sha or await resolve_audit_ref(s, repo)
             # same "worker endpoint else default" rule the distill lanes use
             llm_cfg = await distill_llm_config(s, endpoint_name)
             await s.commit()
@@ -84,10 +86,12 @@ async def run_audit_job(sf, settings, payload: dict, endpoint_name: str | None) 
         workspace = await wm.acquire(ref)
         head = await asyncio.to_thread(subprocess.run, ["git", "rev-parse", "HEAD"],
                                        cwd=workspace, capture_output=True, text=True, timeout=30)
+        head.check_returncode()
         commit_sha = head.stdout.strip() or None
         async with sf() as s:
             row = await s.get(AuditRun, run_id)
-            row.audited_ref, row.commit_sha = ref, commit_sha
+            row.audited_ref = row.audited_ref or ref
+            row.commit_sha = commit_sha
             row.langfuse_trace_id = langfuse_run.trace_id
             await s.commit()
         deps = AuditDeps(sf=sf, settings=settings, llm_cfg=llm_cfg, repo_id=repo.id,

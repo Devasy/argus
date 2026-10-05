@@ -50,6 +50,7 @@ def _verdict(run, learning, action, *, verdict="unfalsifiable", suggested=None,
 async def test_approving_a_rewrite_actually_rewrites_the_learning(db, run):
     """The headline fix: this was a no-op."""
     l = _learning(db)
+    l.embedding = [0.3] * 768
     await db.flush()
     v = _verdict(run, l, "flag_for_rewrite",
                  suggested="Wrap GitLab API calls in try/except and log the "
@@ -63,6 +64,7 @@ async def test_approving_a_rewrite_actually_rewrites_the_learning(db, run):
     assert v.applied_at is not None
     # a rewrite must not archive: the learning is being kept, not removed
     assert l.status == "active"
+    assert l.embedding is None
 
 
 @pytest.mark.asyncio
@@ -98,6 +100,7 @@ async def test_merge_can_sharpen_the_survivors_wording(db, run):
     accepts replacement text too."""
     dup = _learning(db, topic="dup", hint="duplicate wording")
     survivor = _learning(db, topic="survivor", hint="old survivor wording")
+    survivor.embedding = [0.3] * 768
     await db.flush()
     dup.hit_count, survivor.hit_count = 3, 5
     v = _verdict(run, dup, "merge", verdict="duplicate_of",
@@ -107,6 +110,7 @@ async def test_merge_can_sharpen_the_survivors_wording(db, run):
 
     assert await apply_verdict(db, v) is True
     assert survivor.hint_text == "combined, sharper wording"
+    assert survivor.embedding is None
     assert dup.status == "archived"
     assert survivor.hit_count == 8      # evidence still folded in
 
@@ -115,6 +119,7 @@ async def test_merge_can_sharpen_the_survivors_wording(db, run):
 async def test_merge_without_suggestion_keeps_survivor_wording(db, run):
     dup = _learning(db, topic="dup", hint="dup")
     survivor = _learning(db, topic="survivor", hint="keep me")
+    survivor.embedding = [0.3] * 768
     await db.flush()
     v = _verdict(run, dup, "merge", verdict="duplicate_of", related=survivor.id)
     db.add(v)
@@ -122,6 +127,7 @@ async def test_merge_without_suggestion_keeps_survivor_wording(db, run):
 
     assert await apply_verdict(db, v) is True
     assert survivor.hint_text == "keep me"
+    assert survivor.embedding is not None
     assert dup.status == "archived"
 
 
@@ -154,21 +160,24 @@ async def test_unapproved_verdicts_are_never_applied(db, run):
 # --- the auditor must not propose a rewrite it did not write ---------------
 
 def test_rewrite_without_text_is_downgraded_at_write_time():
-    """Enforced where verdicts are persisted, so an un-actionable proposal
-    never reaches the human queue in the first place. Mirrors the guard in
-    run_audit_for_repo."""
-    def persisted_action(action: str, suggested: str | None) -> str:
-        suggested = (suggested or "").strip() or None
-        if action == "flag_for_rewrite" and not suggested:
-            return "none"
-        return action
+    """Enforced where verdicts are persisted (auditor.persisted_verdict), so an
+    un-actionable proposal never reaches the human queue in the first place."""
+    import uuid as _uuid
+    from argus.knowledge.auditor import LearningVerdict, persisted_verdict
 
-    assert persisted_action("flag_for_rewrite", None) == "none"
-    assert persisted_action("flag_for_rewrite", "   ") == "none"
-    assert persisted_action("flag_for_rewrite", "sharper text") == "flag_for_rewrite"
-    # other actions are unaffected by the absence of replacement text
-    assert persisted_action("archive", None) == "archive"
-    assert persisted_action("none", None) == "none"
+    lid = _uuid.uuid4()
+
+    def action(proposed: str, suggested: str | None, verdict: str = "unfalsifiable") -> str:
+        v = LearningVerdict(learning_id=str(lid), verdict=verdict, confidence=0.9,
+                            rationale="r", proposed_action=proposed,
+                            suggested_hint_text=suggested)
+        return persisted_verdict(v, {lid})["action"]
+
+    assert action("flag_for_rewrite", None) == "none"
+    assert action("flag_for_rewrite", "   ") == "none"
+    assert action("flag_for_rewrite", "sharper text") == "flag_for_rewrite"
+    assert action("archive", None, verdict="stale") == "archive"
+    assert action("none", None, verdict="corroborated") == "none"
 
 
 def test_no_action_verdicts_never_reach_the_human_queue():
@@ -215,12 +224,40 @@ def test_auditor_schema_carries_the_suggestion_field():
                            rationale="r").suggested_hint_text is None
 
 
-def test_auditor_prompt_requires_replacement_text_for_rewrites():
-    from argus.knowledge.auditor import _SYSTEM
+def test_ground_prompt_requires_replacement_text_for_rewrites():
+    from argus.knowledge.audit_agents import GROUND_PROMPT
 
-    prompt = " ".join(_SYSTEM.split())
+    prompt = " ".join(GROUND_PROMPT.split())
     assert "suggested_hint_text" in prompt
-    assert "not actionable" in prompt
-    # the model must know an empty rewrite proposal is discarded
-    assert "downgraded to 'none'" in prompt
+    # the model must know an empty rewrite proposal is worthless
+    assert "changes nothing" in prompt
 
+
+
+@pytest.mark.asyncio
+async def test_merge_into_an_archived_survivor_is_refused(db, run):
+    dup = _learning(db, hint="dup")
+    survivor = _learning(db, hint="survivor")
+    await db.flush()
+    survivor.status = "archived"
+    v = _verdict(run, dup, "merge", verdict="duplicate_of", related=survivor.id)
+    db.add(v)
+    await db.flush()
+    assert await apply_verdict(db, v) is False
+    assert dup.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_merge_across_repositories_is_refused(db, run):
+    other = Repository(project_path=f"g/{uuid.uuid4().hex[:8]}", gitlab_project_id=2)
+    db.add(other)
+    await db.flush()
+    dup = _learning(db, hint="dup")
+    survivor = _learning(db, hint="survivor")
+    survivor.repo_id = other.id
+    await db.flush()
+    v = _verdict(run, dup, "merge", verdict="duplicate_of", related=survivor.id)
+    db.add(v)
+    await db.flush()
+    assert await apply_verdict(db, v) is False
+    assert dup.status == "active"

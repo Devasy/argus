@@ -11,8 +11,10 @@ import {
   LayoutDashboard,
   ListChecks,
   AlertTriangle,
+  Users,
 } from "lucide-react";
 import { getToken, setUnauthorizedHandler } from "./api/client";
+import { useMe } from "./api/queries";
 import TokenGate from "./pages/TokenGate";
 import Complaints from "./features/complaints/ComplaintsPage";
 import Dashboard from "./features/dashboard/DashboardPage";
@@ -22,9 +24,11 @@ import RepoDetail from "./features/repos/RepoDetailPage";
 import MRDetail from "./features/mrs/MRDetailPage";
 import ReviewDetail from "./features/run/ReviewDetailPage";
 import DistillationRunDetail from "./features/run/DistillationRunDetailPage";
+import AuditRunDetail from "./features/knowledge/AuditRunDetailPage";
 import Settings from "./features/settings/SettingsPage";
 import Agents from "./features/agents/AgentsPage";
 import Knowledge from "./features/knowledge/KnowledgePage";
+import People from "./features/people/PeoplePage";
 
 function useTheme() {
   const [theme, setTheme] = useState(() => localStorage.getItem("argus_theme") ?? "light");
@@ -39,6 +43,13 @@ export default function App() {
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
+  // Not real access control on its own (the backend's require_role("admin")
+  // is what actually enforces that) -- this just keeps the "People" link
+  // from advertising an admin-only feature to everyone. Driven by the same
+  // role the backend checks, via GET /me, rather than a separate localStorage
+  // guess that could drift from what the token actually grants.
+  const me = useMe();
+  const isAdmin = me.data?.role === "admin";
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
@@ -86,6 +97,11 @@ export default function App() {
           <NavLink to="/complaints">
             <AlertTriangle size={16} /> Complaints
           </NavLink>
+          {isAdmin && (
+            <NavLink to="/people">
+              <Users size={16} /> People
+            </NavLink>
+          )}
           <NavLink to="/settings/review-tuning">
             <SettingsIcon size={16} /> Settings
           </NavLink>
@@ -106,10 +122,12 @@ export default function App() {
           <Route path="/mrs/:mrId" element={<MRDetail />} />
           <Route path="/reviews/:reviewId" element={<ReviewDetail />} />
           <Route path="/distillation-runs/:runId" element={<DistillationRunDetail />} />
+          <Route path="/audit-runs/:runId" element={<AuditRunDetail />} />
           <Route path="/agents" element={<Agents />} />
           <Route path="/agents/:agentId" element={<Agents />} />
           <Route path="/knowledge/*" element={<Knowledge />} />
           <Route path="/complaints" element={<Complaints />} />
+          <Route path="/people/:section?" element={<People />} />
           <Route path="/settings/:section?" element={<Settings />} />
         </Routes>
       </main>

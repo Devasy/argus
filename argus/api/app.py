@@ -311,6 +311,15 @@ def create_app(settings: Settings | None = None,
                 app.state.workers.append(asyncio.create_task(
                     run_worker_forever(sf, handlers, stop, worker_id=spec.id)))
             app.state.worker = app.state.workers[0]
+            # Vector repair must run even when custom chat lanes exclude it,
+            # and must not wait behind an hours-long review on the default lane.
+            from argus.knowledge.embedding_jobs import run_embedding_worker
+            embedding_worker_id = "embedding-maintenance"
+            while embedding_worker_id in {spec.id for spec in specs}:
+                embedding_worker_id += "-1"
+            app.state.embedding_worker = asyncio.create_task(run_embedding_worker(
+                sf, settings, stop, worker_id=embedding_worker_id))
+            app.state.workers.append(app.state.embedding_worker)
 
     @app.on_event("shutdown")
     async def _shutdown():
@@ -321,6 +330,10 @@ def create_app(settings: Settings | None = None,
         auditor_task = getattr(app.state, "auditor", None)
         if auditor_task is not None:
             auditor_task.cancel()
+        embedding_task = getattr(app.state, "embedding_worker", None)
+        if embedding_task is not None:
+            embedding_task.cancel()
+            await asyncio.gather(embedding_task, return_exceptions=True)
 
     @app.get("/health")
     async def health():
@@ -1126,21 +1139,29 @@ def create_app(settings: Settings | None = None,
             run = await session.get(DistillationRun, run_id)
             if run is None:
                 raise HTTPException(404)
-            from argus.domain.models import DistillThread
+            from argus.domain.models import DistillationDecision, DistillThread
+            saved = (await session.execute(select(DistillationDecision).where(
+                DistillationDecision.distillation_run_id == run_id)
+                .order_by(DistillationDecision.created_at, DistillationDecision.id))).scalars().all()
             rows = (await session.execute(select(DistillThread).where(
                 DistillThread.distillation_run_id == run_id)
                 .order_by(DistillThread.created_at))).scalars().all()
+            discussion_ids = list(dict.fromkeys(
+                [r.discussion_id for r in rows] + [r.discussion_id for r in saved]))
             labels: dict = {}
-            if rows:
+            if discussion_ids:
                 for did, disp in (await session.execute(
                         select(Note.discussion_id, Note.disposition).where(
-                            Note.discussion_id.in_([r.discussion_id for r in rows]),
+                            Note.discussion_id.in_(discussion_ids),
                             Note.author_type == "bot")
-                        .order_by(Note.note_created_at))).all():
+                        .order_by(Note.note_created_at, Note.id))).all():
                     labels.setdefault(did, disp)
             mr = await session.get(MergeRequest, run.mr_id)
+            preview_ids = list(dict.fromkeys(
+                [r.discussion_id for r in rows] +
+                [r.discussion_id for r in saved if not r.decision.get("thread")]))
             thread_views = {t.discussion_id: t for t in await build_threads(
-                session, mr, [r.discussion_id for r in rows])} if rows and mr else {}
+                session, mr, preview_ids)} if preview_ids and mr else {}
             threads = [DistillThreadOut(
                 discussion_id=r.discussion_id, thread_type=r.thread_type, status=r.status,
                 reconciler_label=labels.get(r.discussion_id) if r.thread_type == "bot_thread" else None,
@@ -1148,6 +1169,17 @@ def create_app(settings: Settings | None = None,
                 learning_ids=r.learning_ids or [], decision_reason=r.decision_reason,
                 thread=thread_views.get(r.discussion_id))
                 for r in rows]
+            if saved:
+                threads = [DistillThreadOut.model_validate(r.decision) for r in saved]
+                # Backfilled decisions have no captured conversation. Use an
+                # available current preview without replacing genuine snapshots.
+                for record, thread in zip(saved, threads, strict=True):
+                    if thread.thread is None:
+                        thread.thread = thread_views.get(thread.discussion_id)
+                    if (thread.thread_type == "bot_thread"
+                            and thread.reconciler_label is None
+                            and not record.decision.get("thread")):
+                        thread.reconciler_label = labels.get(thread.discussion_id)
             return DistillationRunOut(threads=threads,
                 id=run.id, mr_id=run.mr_id, status=run.status, trigger=run.trigger,
                 note_ids=run.note_ids, error=run.error,

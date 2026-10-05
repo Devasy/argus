@@ -1,4 +1,5 @@
 from langchain_core.messages import AIMessage
+import pytest
 
 from argus.llm.config import LLMConfig
 from argus.llm.factory import _GroqChatLiteLLM, build_chat_model
@@ -14,6 +15,68 @@ def _cfg(**overrides):
 def _prior_ai_turn_with_reasoning():
     return [AIMessage(content="done thinking", additional_kwargs={
         "reasoning_content": "step by step reasoning that Groq rejects"})]
+
+
+def test_fallback_keeps_callbacks_without_duplicating_langfuse():
+    from langchain_core.callbacks import BaseCallbackHandler
+    tracer, langfuse = BaseCallbackHandler(), BaseCallbackHandler()
+    model = build_chat_model(_cfg(langfuse_handler=langfuse,
+        fallback={"provider": "groq", "model": "groq/fallback"}), callbacks=[tracer])
+    assert model.callbacks == model.fallback_model.callbacks == [tracer, langfuse]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_sync_context_overflow_reaches_caller_without_fallback(monkeypatch, stream):
+    from langchain_litellm import ChatLiteLLM
+    from litellm import ContextWindowExceededError
+    error = ContextWindowExceededError(message="context exceeded", model="primary", llm_provider="openai")
+    calls = []
+
+    def fail(self, *args, **kwargs):
+        calls.append(self.model)
+        raise error
+        yield  # The streaming path must be a generator.
+
+    def fail_generate(self, *args, **kwargs):
+        calls.append(self.model)
+        raise error
+
+    monkeypatch.setattr(ChatLiteLLM, "_stream" if stream else "_generate", fail if stream else fail_generate)
+    model = build_chat_model(_cfg(fallback={"provider": "groq", "model": "groq/fallback"}))
+    with pytest.raises(ContextWindowExceededError) as caught:
+        if stream:
+            list(model._stream(_prior_ai_turn_with_reasoning()))
+        else:
+            model._generate(_prior_ai_turn_with_reasoning())
+    assert caught.value is error
+    assert calls == [model.model]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_async_context_overflow_reaches_caller_without_fallback(monkeypatch, stream):
+    from langchain_litellm import ChatLiteLLM
+    from litellm import ContextWindowExceededError
+    error = ContextWindowExceededError(message="context exceeded", model="primary", llm_provider="openai")
+    calls = []
+
+    async def fail(self, *args, **kwargs):
+        calls.append(self.model)
+        raise error
+        yield
+
+    async def fail_generate(self, *args, **kwargs):
+        calls.append(self.model)
+        raise error
+
+    monkeypatch.setattr(ChatLiteLLM, "_astream" if stream else "_agenerate", fail if stream else fail_generate)
+    model = build_chat_model(_cfg(fallback={"provider": "groq", "model": "groq/fallback"}))
+    with pytest.raises(ContextWindowExceededError) as caught:
+        if stream:
+            [chunk async for chunk in model._astream(_prior_ai_turn_with_reasoning())]
+        else:
+            await model._agenerate(_prior_ai_turn_with_reasoning())
+    assert caught.value is error
+    assert calls == [model.model]
 
 
 def test_build_chat_model_sends_reasoning_budget_for_ollama_provider():
@@ -50,18 +113,13 @@ def test_build_chat_model_passes_num_retries_as_max_retries():
     assert model.max_retries == 5
 
 
-def test_build_chat_model_sends_fallback_via_model_kwargs():
-    """cfg.fallback is a litellm-shaped {model, api_base, api_key} dict for a
-    second endpoint. litellm.completion's own `fallbacks=` kwarg is read from
-    the top level of the request, and ChatLiteLLM.model_kwargs is spread
-    directly into that request -- so this needs no custom retry code, just
-    forwarding cfg.fallback into model_kwargs["fallbacks"]."""
+def test_build_chat_model_constructs_a_separate_fallback_endpoint():
     cfg = _cfg(fallback={"model": "openai/qwen3.8-27b",
                          "api_base": "http://llama:8080/v1", "api_key": None})
     model = build_chat_model(cfg)
-    assert model.model_kwargs["fallbacks"] == [
-        {"model": "openai/qwen3.8-27b", "api_base": "http://llama:8080/v1",
-         "api_key": None}]
+    assert "fallbacks" not in model.model_kwargs
+    assert model.fallback_model.model == "openai/qwen3.8-27b"
+    assert model.fallback_model.api_base == "http://llama:8080/v1"
 
 
 def test_build_chat_model_omits_fallback_when_unset():
@@ -77,8 +135,8 @@ def test_build_chat_model_combines_fallback_and_ollama_reasoning_budget():
                fallback={"model": "groq/x", "api_base": None, "api_key": "k"})
     model = build_chat_model(cfg)
     assert model.model_kwargs["reasoning_budget_tokens"] == 8192
-    assert model.model_kwargs["fallbacks"] == [
-        {"model": "groq/x", "api_base": None, "api_key": "k"}]
+    assert isinstance(model.fallback_model, _GroqChatLiteLLM)
+    assert model.fallback_model.model_kwargs == {}
 
 
 def test_build_chat_model_uses_groq_subclass_for_groq_provider():

@@ -12,6 +12,7 @@ import PaginationBar from "../../components/PaginationBar";
 import StatusBadge from "../../components/StatusBadge";
 import Toggle from "../../components/Toggle";
 import RepoAgentsPanel from "./RepoAgentsPanel";
+import RepoSistersPanel from "./RepoSistersPanel";
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
@@ -58,12 +59,16 @@ type StateFilter = "all" | "opened" | "merged" | "closed";
 function EditRepoSettings({
   repoId,
   pollIntervalS,
+  staleMrAfterDays,
+  learningsCooldownHours,
   defaultProfileId,
   autoReviewEnabled,
   onClose,
 }: {
   repoId: string;
   pollIntervalS: number;
+  staleMrAfterDays: number;
+  learningsCooldownHours: number;
   defaultProfileId: string | null;
   autoReviewEnabled: boolean;
   onClose: () => void;
@@ -71,6 +76,8 @@ function EditRepoSettings({
   const profiles = useProfiles();
   const updateRepository = useUpdateRepository();
   const [pollInterval, setPollInterval] = useState(String(pollIntervalS));
+  const [staleDays, setStaleDays] = useState(String(staleMrAfterDays));
+  const [learningsCooldown, setLearningsCooldown] = useState(String(learningsCooldownHours));
   const [profileId, setProfileId] = useState(defaultProfileId ?? DEFAULT_PROFILE_VALUE);
   const [autoReview, setAutoReview] = useState(autoReviewEnabled);
 
@@ -80,6 +87,8 @@ function EditRepoSettings({
         repoId,
         {
           poll_interval_s: Number(pollInterval),
+          stale_mr_after_days: Number(staleDays),
+          learnings_cooldown_hours: Number(learningsCooldown),
           default_profile_id: profileId === DEFAULT_PROFILE_VALUE ? null : profileId,
           auto_review_enabled: autoReview,
         },
@@ -103,6 +112,37 @@ function EditRepoSettings({
           min={1}
           value={pollInterval}
           onChange={(e) => setPollInterval(e.target.value)}
+        />
+      </div>
+      <div className="f-row">
+        <div className="fl">
+          <b>Stale MR threshold</b>
+          <span>
+            days without a new commit before an open MR is treated as abandoned and skipped by
+            the reconciliation sweep
+          </span>
+        </div>
+        <input
+          type="number"
+          min={1}
+          value={staleDays}
+          onChange={(e) => setStaleDays(e.target.value)}
+        />
+      </div>
+      <div className="f-row">
+        <div className="fl">
+          <b>Learnings cooldown</b>
+          <span>
+            hours after this repo is added before the poller starts mining learnings from its
+            MRs — keeps a large historical backfill from seeding the learnings store with old,
+            no-longer-relevant discussions. 0 disables the cooldown.
+          </span>
+        </div>
+        <input
+          type="number"
+          min={0}
+          value={learningsCooldown}
+          onChange={(e) => setLearningsCooldown(e.target.value)}
         />
       </div>
       <div className="f-row">
@@ -137,7 +177,15 @@ function EditRepoSettings({
         <button
           className="btn-p"
           onClick={submit}
-          disabled={updateRepository.isPending || !pollInterval.trim() || Number(pollInterval) <= 0}
+          disabled={
+            updateRepository.isPending ||
+            !pollInterval.trim() ||
+            Number(pollInterval) <= 0 ||
+            !staleDays.trim() ||
+            Number(staleDays) <= 0 ||
+            !learningsCooldown.trim() ||
+            Number(learningsCooldown) < 0
+          }
         >
           {updateRepository.isPending ? "Saving…" : "Save"}
         </button>
@@ -151,7 +199,7 @@ export default function RepoDetail() {
   const navigate = useNavigate();
   const repo = useRepository(repoId!);
   const [editing, setEditing] = useState(false);
-  const [stateFilter, setStateFilter] = useState<StateFilter>("all");
+  const [stateFilter, setStateFilter] = useState<StateFilter>("opened");
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(20);
   const stateParam = stateFilter === "all" ? undefined : stateFilter;
@@ -191,11 +239,15 @@ export default function RepoDetail() {
         <EditRepoSettings
           repoId={repo.data.id}
           pollIntervalS={repo.data.poll_interval_s}
+          staleMrAfterDays={repo.data.stale_mr_after_days}
+          learningsCooldownHours={repo.data.learnings_cooldown_hours}
           defaultProfileId={repo.data.default_profile_id}
           autoReviewEnabled={repo.data.auto_review_enabled}
           onClose={() => setEditing(false)}
         />
       )}
+
+      {repo.data && <RepoSistersPanel key={repo.data.id} repoId={repo.data.id} />}
 
       {mrs.error && <ErrorBox message={mrs.error.message} onRetry={mrs.refetch} />}
       {mrs.isPending && <div className="spinner">Loading merge requests…</div>}
@@ -254,7 +306,16 @@ export default function RepoDetail() {
                   <td className="col-fill">{mr.title}</td>
                   <td>{mr.author_username ?? "—"}</td>
                   <td>
-                    <StatusBadge status={mr.state} />
+                    <div className="row" style={{ gap: 6 }}>
+                      <StatusBadge status={mr.state} />
+                      {mr.is_stale && (
+                        <span
+                          title={`No new commits in over ${repo.data?.stale_mr_after_days ?? 30} days`}
+                        >
+                          <StatusBadge status="stale" />
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td>
                     <CommentCounts

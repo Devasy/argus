@@ -365,3 +365,125 @@ def test_git_does_not_retry_a_real_error(monkeypatch):
     with pytest.raises(RuntimeError, match="couldn't find remote ref"):
         ws._run(["git", "fetch", "origin", "x"])
     assert len(calls) == 1
+
+
+def test_git_diagnostics_redact_userinfo_with_slashes():
+    from argus.review.workspace import _safe_git_error
+    message = "unable to access https://user:pass/word@host/repo.git: failed"
+    safe = _safe_git_error(message, None)
+    assert "pass" not in safe and "word" not in safe
+    assert "https://[redacted]@host/repo.git" in safe
+
+
+async def test_http_credentials_never_enter_argv_or_logged_traceback(tmp_path, monkeypatch):
+    import traceback
+    import pytest
+    import argus.review.workspace as ws
+    token = "dummy-test-password"
+    seen = []
+
+    def fail(args, **kw):
+        seen.append((args, kw.get("env")))
+        raise subprocess.CalledProcessError(128, args, stderr=f"authentication failed: {token}")
+
+    monkeypatch.setattr(ws.subprocess, "run", fail)
+    wm = WorkspaceManager(tmp_path / "root", f"https://oauth2:{token}@gitlab.test/group/repo.git")
+    with pytest.raises(RuntimeError) as caught:
+        await wm.acquire("a" * 40)
+    args, env = seen[0]
+    assert args[3] == "https://gitlab.test/group/repo.git"
+    assert token not in " ".join(args)
+    assert any(v.startswith("Authorization: Basic ") for v in env.values())
+    assert token not in "".join(traceback.format_exception(caught.value))
+
+
+async def test_http_authentication_works_without_persisting_credentials(tmp_path):
+    import base64
+    import functools
+    import threading
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import quote
+    url, sha = _make_origin(tmp_path)
+    served = tmp_path / "served"
+    served.mkdir()
+    bare = served / "repo.git"
+    subprocess.run(["git", "clone", "--bare", url, str(bare)], check=True, capture_output=True)
+    subprocess.run(["git", "update-server-info"], cwd=bare, check=True)
+    credentials = "oauth2:dummy:p@ss/word"
+    expected = "Basic " + base64.b64encode(credentials.encode()).decode()
+    authenticated = []
+
+    class Handler(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            if self.headers.get("Authorization") != expected:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="test"')
+                self.end_headers()
+                return
+            authenticated.append(self.path)
+            super().do_GET()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=str(served)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    root = tmp_path / "workspace"
+    clean_url = f"http://127.0.0.1:{server.server_port}/repo.git"
+    credential_url = clean_url.replace("http://", f"http://oauth2:{quote(credentials.partition(':')[2], safe='')}@")
+    wm = WorkspaceManager(root, credential_url)
+    try:
+        wt = await wm.acquire(sha)
+        assert (wt / "hello.py").read_text().startswith("x = 1")
+        # The existing-workspace path must authenticate again with runtime credentials.
+        await wm.acquire(sha)
+        config = (wm.bare / "config").read_text()
+        assert credential_url not in config
+        assert "dummy" not in config
+        assert clean_url in config
+        assert authenticated
+        await wm.release(sha)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+async def test_windows_cleanup_recovers_only_an_empty_worktree_directory(tmp_path, monkeypatch):
+    import argus.review.workspace as ws
+    url, sha = _make_origin(tmp_path)
+    wm = WorkspaceManager(tmp_path / "root", url)
+    wt = await wm.acquire(sha)
+    real_run = ws._run
+
+    def partially_removed(args, cwd=None, **kwargs):
+        real_run(args, cwd=cwd, **kwargs)
+        if args[:3] == ["git", "worktree", "remove"]:
+            wt.mkdir(exist_ok=True)
+            raise RuntimeError("failed to delete directory: Permission denied")
+
+    monkeypatch.setattr(ws, "_WINDOWS", True)
+    monkeypatch.setattr(ws, "_run", partially_removed)
+    await wm.release(sha)
+    assert not wt.exists()
+
+
+async def test_windows_cleanup_preserves_nonempty_worktree_on_failure(tmp_path, monkeypatch):
+    import pytest
+    import argus.review.workspace as ws
+    url, sha = _make_origin(tmp_path)
+    wm = WorkspaceManager(tmp_path / "root", url)
+    wt = await wm.acquire(sha)
+    real_run = ws._run
+
+    def blocked(args, cwd=None, **kwargs):
+        if args[:3] == ["git", "worktree", "remove"]:
+            raise RuntimeError("failed to delete directory: Permission denied")
+        real_run(args, cwd=cwd, **kwargs)
+
+    monkeypatch.setattr(ws, "_WINDOWS", True)
+    monkeypatch.setattr(ws, "_run", blocked)
+    with pytest.raises(RuntimeError, match="Permission denied"):
+        await wm.release(sha)
+    assert (wt / "hello.py").read_text().startswith("x = 1")

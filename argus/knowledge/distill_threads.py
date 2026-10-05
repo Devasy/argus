@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, select
+from sqlalchemy.dialects.postgresql import aggregate_order_by, array_agg
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -114,7 +115,7 @@ async def load_threads(session: AsyncSession, mr,
                            Note.kind.in_(_HUMAN_KINDS))
     if discussion_ids is not None:
         q = q.where(Note.discussion_id.in_(discussion_ids))
-    notes = (await session.execute(q.order_by(Note.note_created_at))).scalars().all()
+    notes = (await session.execute(q.order_by(Note.note_created_at, Note.id))).scalars().all()
     by_disc: dict = {}
     for n in notes:
         n.note_created_at = _aware(n.note_created_at)
@@ -288,6 +289,7 @@ async def payload_discussion_ids(session: AsyncSession, payload: dict) -> list[u
 
 
 SWEEP_MR_LIMIT = 200
+SWEEP_SCAN_LIMIT = 1000
 
 
 async def sweep_pending_threads(session: AsyncSession, repo, now: datetime, *,
@@ -297,23 +299,108 @@ async def sweep_pending_threads(session: AsyncSession, repo, now: datetime, *,
     from sqlalchemy import and_, or_
 
     from argus.domain.models import MergeRequest
+    from argus.knowledge.maintenance_state import read_cursor, write_cursor
     lt = DistillThread
-    mr_ids = (await session.execute(
-        select(MergeRequest.id).join(Note, Note.mr_id == MergeRequest.id)
-        .outerjoin(lt, lt.discussion_id == Note.discussion_id)
-        .where(MergeRequest.repo_id == repo.id, Note.author_type == "human",
-               Note.kind.in_(_HUMAN_KINDS), Note.discussion_id.isnot(None),
+    human = Note.author_type == "human"
+    humans = (select(Note.discussion_id,
+                     func.count().filter(human).label("human_count"),
+                     func.min(Note.note_created_at).filter(human).label("oldest"),
+                     func.max(Note.note_created_at).filter(human).label("last_human"),
+                     array_agg(aggregate_order_by(Note.author_type,
+                         Note.note_created_at, Note.id))[1].label("opener"),
+                     func.md5(func.string_agg(cast(Note.id, String),
+                         aggregate_order_by(",", cast(Note.id, String)))
+                         .filter(human)).label("content_hash"))
+              .join(Discussion, Discussion.id == Note.discussion_id)
+              .join(MergeRequest, MergeRequest.id == Discussion.mr_id)
+              .where(MergeRequest.repo_id == repo.id,
+                     Note.kind.in_(_HUMAN_KINDS),
+                     Note.discussion_id.isnot(None))
+              .group_by(Note.discussion_id).subquery())
+    oldest = func.coalesce(func.min(humans.c.oldest), now)
+    pending = (
+        select(MergeRequest.id.label("mr_id"), oldest.label("oldest"))
+        .join(Discussion, Discussion.mr_id == MergeRequest.id)
+        .join(humans, humans.c.discussion_id == Discussion.id)
+        .outerjoin(lt, lt.discussion_id == Discussion.id)
+        .where(MergeRequest.repo_id == repo.id, humans.c.human_count > 0,
+               humans.c.opener != "external_bot",
                or_(lt.id.is_(None),
+                   lt.content_hash != humans.c.content_hash,
                    and_(lt.status == "failed", lt.attempts < MAX_THREAD_ATTEMPTS),
                    and_(lt.status == "queued",
                         lt.updated_at < now - timedelta(hours=STALE_QUEUED_HOURS),
-                        lt.attempts < MAX_THREAD_ATTEMPTS),
-                   Note.note_created_at > lt.updated_at))
-        .group_by(MergeRequest.id)
-        .order_by(func.min(Note.note_created_at))
-        .limit(SWEEP_MR_LIMIT))).scalars().all()
-    jobs = 0
-    for mr_id in mr_ids:
-        mr = await session.get(MergeRequest, mr_id)
-        jobs += len(await enqueue_ready_threads(session, mr, now, quiet_hours=quiet_hours))
+                        lt.attempts < MAX_THREAD_ATTEMPTS))))
+    candidates = pending.group_by(MergeRequest.id).subquery()
+    ready_candidates = (pending.where(
+        or_(MergeRequest.state.in_(("merged", "closed")), Discussion.resolved.is_(True),
+            humans.c.last_human <= now - timedelta(hours=quiet_hours)))
+        .group_by(MergeRequest.id).subquery())
+    jobs = eligible_mrs = scanned = 0
+    cursor = None
+    saved = await read_cursor(session, repo.id, "thread_sweep_cursor")
+    if saved:
+        try:
+            at = datetime.fromisoformat(saved["oldest"])
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+            cursor = (at, uuid.UUID(saved["mr_id"]))
+        except (ValueError, TypeError, KeyError):
+            pass  # A malformed cursor must not stop a repository's sweeps.
+
+    def after_cursor(q, source, position):
+        if position is None:
+            return q
+        at, mr_id = position
+        return q.where(or_(source.c.oldest > at,
+                          and_(source.c.oldest == at, source.c.mr_id > mr_id)))
+
+    # Readiness changes with time, resolution, MR state and new replies. A
+    # persisted historical cursor cannot represent those transitions. Always
+    # service currently ready work first, including rows behind that cursor,
+    # while reserving scan capacity for continuation of the general backlog.
+    visited = set()
+    ready_cursor = None
+    ready_budget = min(SWEEP_MR_LIMIT, max(1, SWEEP_SCAN_LIMIT // 2))
+    while scanned < ready_budget and eligible_mrs < SWEEP_MR_LIMIT:
+        q = select(ready_candidates).order_by(ready_candidates.c.oldest, ready_candidates.c.mr_id)
+        batch = (await session.execute(after_cursor(q, ready_candidates, ready_cursor)
+            .limit(ready_budget - scanned))).all()
+        if not batch:
+            break
+        for mr_id, at in batch:
+            ready_cursor = (at, mr_id)
+            visited.add(mr_id)
+            scanned += 1
+            mr = await session.get(MergeRequest, mr_id)
+            enqueued = await enqueue_ready_threads(session, mr, now, quiet_hours=quiet_hours)
+            jobs += len(enqueued)
+            eligible_mrs += bool(enqueued)
+            if eligible_mrs >= SWEEP_MR_LIMIT:
+                break
+
+    # Limit both expensive per-MR loads and enqueued MRs. Resume across ticks
+    # so an arbitrarily large ineligible prefix cannot monopolize the poller.
+    while eligible_mrs < SWEEP_MR_LIMIT and scanned < SWEEP_SCAN_LIMIT:
+        q = select(candidates).order_by(candidates.c.oldest, candidates.c.mr_id)
+        batch = (await session.execute(after_cursor(q, candidates, cursor).limit(
+            min(SWEEP_MR_LIMIT, SWEEP_SCAN_LIMIT - scanned)))).all()
+        if not batch:
+            break
+        for mr_id, at in batch:
+            cursor = (at, mr_id)
+            scanned += 1
+            if mr_id in visited:
+                continue
+            mr = await session.get(MergeRequest, mr_id)
+            enqueued = await enqueue_ready_threads(session, mr, now, quiet_hours=quiet_hours)
+            jobs += len(enqueued)
+            eligible_mrs += bool(enqueued)
+            if eligible_mrs >= SWEEP_MR_LIMIT:
+                break
+    more = (await session.execute(after_cursor(select(candidates.c.mr_id), candidates, cursor)
+                                 .limit(1))).first()
+    value = ({"oldest": cursor[0].isoformat(), "mr_id": str(cursor[1])}
+             if more and cursor else None)
+    await write_cursor(session, repo.id, "thread_sweep_cursor", value)
     return jobs

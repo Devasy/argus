@@ -84,14 +84,16 @@ def _read_tools(deps: AuditDeps, stage_name: str) -> list:
 
 
 async def _run_agent(deps: AuditDeps, stage_name: str, system_prompt: str, user_msg: str,
-                     response_model, max_rounds: int, tools: list):
+                     response_model, max_rounds: int, tools: list, *, parent_stage_names=None):
     """One agent call with its own trace stage, the shared model-call gate, and a stage row."""
     from argus.llm.factory import build_chat_model
     from argus.llm.trace import DBTraceCallback
     callbacks = [DBTraceCallback(deps.sf, stage_name, audit_run_id=deps.run_id)]
     if deps.llm_cfg.langfuse_handler is not None:
         callbacks.append(deps.llm_cfg.langfuse_handler)
-    await record_stage(deps.sf, deps.run_id, stage_name, "running")
+    lineage = ({"_parent_stage_names": parent_stage_names}
+               if parent_stage_names is not None else {})
+    await record_stage(deps.sf, deps.run_id, stage_name, "running", artifact=lineage or None)
     try:
         out = await stages.run_stage_agent(
             build_chat_model(deps.llm_cfg, callbacks=callbacks), tools, system_prompt, user_msg,
@@ -110,9 +112,10 @@ async def _run_agent(deps: AuditDeps, stage_name: str, system_prompt: str, user_
         # error was treated: scout falls back to un-grouped due ids, ground
         # retries once and otherwise leaves the learning due, relate/verify
         # simply produce nothing for that branch.
-        await record_stage(deps.sf, deps.run_id, stage_name, "failed", error=str(e)[:1500])
+        await record_stage(deps.sf, deps.run_id, stage_name, "failed",
+                           artifact=lineage or None, error=str(e)[:1500])
         return None
-    await record_stage(deps.sf, deps.run_id, stage_name, "done", artifact=out.model_dump())
+    await record_stage(deps.sf, deps.run_id, stage_name, "done", artifact={**out.model_dump(), **lineage})
     return out
 
 
@@ -211,7 +214,9 @@ def build_audit_graph(deps: AuditDeps, checkpointer):
         out = await _run_agent(deps, f"relate:k{payload['n']}", aa.RELATE_PROMPT,
                                "SIMILAR LEARNINGS:\n\n" + aa.format_cards(cards, notes),
                                aa.RelationList, RELATE_MAX_ROUNDS,
-                               _read_tools(deps, f"relate:k{payload['n']}"))
+                               _read_tools(deps, f"relate:k{payload['n']}"),
+                               parent_stage_names=[f"ground:{g.group_id}" for g in state.groups
+                                                   if set(g.learning_ids).intersection(notes)])
         return {"relations": aa.valid_relations(out.relations if out else [], set(ids))}
 
     async def verify(state: AuditState) -> dict:

@@ -171,3 +171,12 @@ def test_selection_can_be_narrowed_to_the_scored_mrs():
     assert len(everything) == len(gs.merge_requests)
     assert len(scored) == 7
     assert all(m.scored for m in scored)
+
+
+def test_one_finding_cannot_satisfy_two_gold_items():
+    items = [spec.Item(id=i, project_path="p", mr_iid=1, file="a.py", line=1,
+                       verdict="bot_right", claim="Missing null guard on config",
+                       why="") for i in ("x", "y")]
+    r = scoring.score_mr(items, [_finding("a.py", "Missing null guard on config")])
+    assert r.hits == 1
+    assert r.misses == ["y"]

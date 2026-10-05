@@ -7,8 +7,11 @@ is gone -- audit_interval_days now governs when a LEARNING is re-checked, not
 when a REPO gets audited.
 """
 import asyncio
+import hashlib
+import json
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 logger = logging.getLogger("argus.audit_scheduler")
 
@@ -48,12 +51,9 @@ async def run_audit_forever(sf, settings, sleep_seconds: int = 3600) -> None:
     """Background loop. No-op unless settings.audit_enabled is on.
 
     Enqueues, never runs: an audit_repo job (Task 9's audit_job.py) does the
-    actual work on its own worker lane, pinned to GPU 2."""
+    actual work on a configured worker lane."""
     from sqlalchemy import select
-
     from argus.domain.models import Repository
-    from argus.knowledge.audit_job import enqueue_audit
-    from argus.knowledge.audit_pick import count_due
 
     while True:
         try:
@@ -61,19 +61,106 @@ async def run_audit_forever(sf, settings, sleep_seconds: int = 3600) -> None:
                 await asyncio.sleep(sleep_seconds)
                 continue
             async with sf() as s:
-                repos = list((await s.execute(
-                    select(Repository).where(Repository.enabled == True)  # noqa: E712
+                repo_ids = list((await s.execute(
+                    select(Repository.id).where(Repository.enabled == True)  # noqa: E712
                 )).scalars().all())
-                now = datetime.now(timezone.utc)
-                ws_base = Path(settings.workspace_dir) if getattr(settings, "workspace_dir", None) else None
-                for repo in repos:
-                    ws_path = ws_base / repo.project_path if (ws_base and (ws_base / repo.project_path).exists()) else None
-                    due = await count_due(s, repo.id, now=now,
-                                          reaudit_after_days=settings.audit_interval_days,
-                                          workspace=ws_path)
-                    if due:
-                        await enqueue_audit(s, repo.id, trigger="scheduled")
-                await s.commit()
+            now = datetime.now(timezone.utc)
+            for repo_id in repo_ids:
+                try:
+                    async with sf() as s:
+                        await _schedule_repo(s, settings, repo_id, now)
+                        await s.commit()
+                except Exception:
+                    logger.exception("audit scheduling failed for repo %s", repo_id)
         except Exception:
             logger.exception("audit scheduler iteration failed")
         await asyncio.sleep(sleep_seconds)
+
+
+async def _schedule_repo(s, settings, repo_id, now):
+    from sqlalchemy import select
+    from argus.domain.models import AuditRun, Learning, Repository
+    from argus.gitlab.client import GitLabClient
+    from argus.knowledge.audit_job import enqueue_audit
+    from argus.knowledge.audit_pick import changed_paths_since, count_due
+    from argus.knowledge.auditor import resolve_audit_ref
+    from argus.knowledge.maintenance_state import read_cursor, write_cursor
+    from argus.review.workspace import WorkspaceManager
+
+    repo = await s.get(Repository, repo_id)
+    if repo is None or not repo.enabled:
+        return
+    busy = (await s.execute(select(AuditRun.id).where(
+        AuditRun.repo_id == repo.id, AuditRun.status.in_(("queued", "running")))
+        .limit(1))).first()
+    if busy:
+        return
+    due = await count_due(s, repo.id, now=now,
+                          reaudit_after_days=settings.audit_interval_days)
+    if not due:
+        tracked = (await s.execute(select(Learning.id, Learning.audited_at_sha,
+            Learning.file_paths, Learning.last_audited_at).where(
+            Learning.repo_id == repo.id, Learning.status == "active",
+            Learning.audited_at_sha.isnot(None), Learning.file_paths.isnot(None))
+            .order_by(Learning.id))).all()
+        tracked = [row for row in tracked if row.file_paths]
+        if tracked:
+            ref = await resolve_audit_ref(s, repo)
+            client = GitLabClient(settings.gitlab_url, settings.gitlab_token,
+                                 settings.gitlab_ca_bundle or settings.gitlab_ssl_verify)
+            try:
+                if ref == "HEAD":
+                    project = await client.get_project(repo.gitlab_project_id)
+                    ref = project.get("default_branch")
+                branch = await client.get_branch(repo.gitlab_project_id, ref) if ref else None
+                if branch is None:
+                    logger.warning("audit branch %r unavailable for repo %s", ref, repo.id)
+                    return
+                sha = (branch.get("commit") or {}).get("id")
+                if not isinstance(sha, str) or len(sha) != 40 or any(
+                        c not in "0123456789abcdef" for c in sha):
+                    raise ValueError("audit branch response has no full commit SHA")
+            finally:
+                await client.aclose()
+            # A same-head cache alone misses new/edited learnings or different
+            # audited baselines. Bind the result to the exact selection inputs.
+            inputs = [[str(r.id), r.audited_at_sha, sorted(r.file_paths),
+                       r.last_audited_at.isoformat() if r.last_audited_at else None]
+                      for r in tracked]
+            fingerprint = hashlib.sha256(json.dumps(inputs).encode()).hexdigest()
+            cursor = {"ref": ref, "sha": sha, "inputs": fingerprint,
+                      "provider_url": settings.gitlab_url, "project": repo.project_path}
+            if await read_cursor(s, repo.id, "audit_cursor") == cursor:
+                return
+            wm = WorkspaceManager(
+                Path(settings.workspace_root).expanduser() / str(repo.id),
+                f"{settings.gitlab_url.replace('://', f'://oauth2:{settings.gitlab_token}@')}"
+                f"/{repo.project_path}.git")
+            acquired = False
+            try:
+                # If every learning was checked at this very tip, no checkout
+                # is needed even on the first tick after restart/deployment.
+                baselines = {r.audited_at_sha for r in tracked} - {sha}
+                diffs = {}
+                if baselines:
+                    workspace = await wm.acquire(sha)
+                    acquired = True
+                    for baseline in baselines:
+                        diffs[baseline] = await asyncio.to_thread(
+                            changed_paths_since, workspace, baseline)
+                for row in tracked:
+                    if row.audited_at_sha == sha:
+                        continue
+                    paths = diffs[row.audited_at_sha]
+                    # Missing history must trigger a fresh audit, never a
+                    # cached assertion that no referenced file changed.
+                    if paths is None or set(row.file_paths).intersection(paths):
+                        due = 1
+                        break
+            finally:
+                if acquired:
+                    await wm.release(sha)
+            if not due:
+                await write_cursor(s, repo.id, "audit_cursor", cursor)
+    if due:
+        await enqueue_audit(s, repo.id, trigger="scheduled")

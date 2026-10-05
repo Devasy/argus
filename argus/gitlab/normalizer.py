@@ -32,12 +32,12 @@ def classify_system_note(body: str) -> str | None:
 TOKEN_BOT_USERNAME = re.compile(r"^(project|group)_\d+_bot_[0-9a-zA-Z]+$|.*[-_]bot$|^bot[-_].*", re.IGNORECASE)
 
 
-def classify_author(username: str, bot_usernames: set[str]) -> str:
+def classify_author(username: str, bot_usernames: set[str], *, is_bot: bool = False) -> str:
     """argus itself is "bot"; another review bot is "external_bot", kept out of human learning."""
     u = username or ""
     if u in bot_usernames:
         return "bot"
-    if TOKEN_BOT_USERNAME.match(u):
+    if is_bot or u == "pr_agent" or TOKEN_BOT_USERNAME.match(u):
         return "external_bot"
     return "human"
 
@@ -59,6 +59,8 @@ async def upsert_actor(session: AsyncSession, user: dict) -> Actor:
                       avatar_url=user.get("avatar_url"))
         session.add(actor)
         await session.flush()
+    if user.get("bot") is True:
+        actor.is_bot = True
     return actor
 
 
@@ -183,11 +185,15 @@ async def sync_merge_request(session: AsyncSession, repo: Repository,
                 note.system_event_type = classify_system_note(note.body)
             else:
                 username = (raw_note.get("author") or {}).get("username", "")
-                note.author_type = classify_author(username, bot_usernames)
+                note.author_type = classify_author(
+                    username, bot_usernames,
+                    is_bot=(raw_note.get("author") or {}).get("bot") is True)
                 note.kind = "inline" if raw_note.get("position") else "summary"
             if raw_note.get("author"):
                 a = await upsert_actor(session, raw_note["author"])
                 note.author_id = a.id
+                if not raw_note.get("system"):
+                    note.author_type = classify_author(username, bot_usernames, is_bot=a.is_bot)
                 if note.author_type in ("bot", "external_bot"):
                     a.is_bot = True
             await session.flush()

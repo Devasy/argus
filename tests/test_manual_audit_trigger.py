@@ -9,9 +9,12 @@ from argus.domain.models import Repository
 
 @pytest.fixture
 async def api(engine, settings):
+    settings = settings.model_copy(update={"admin_token": "audit-admin"})
     app = create_app(settings=settings, engine=engine)
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+    headers = {"Authorization": "Bearer audit-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://t",
+                                 headers=headers) as c:
         yield c
 
 
@@ -20,29 +23,34 @@ async def test_trigger_audit_404s_for_unknown_repo(api):
     assert r.status_code == 404
 
 
-async def test_trigger_audit_422s_cleanly_with_no_llm_endpoint_configured(api, db):
-    """No LLMEndpoint row exists in this test DB, so this exercises the real
-    failure path an operator hits before configuring one — must be a clean
-    4xx via the route's own error handling, not an unhandled 500."""
+async def test_trigger_audit_202s_and_enqueues_a_job(api, db):
+    """Triggering an audit now enqueues an audit_repo job and returns
+    immediately -- the LLM call happens later, on the worker."""
+    from argus.domain.models import AuditRun, Job
+
     repo = Repository(provider="gitlab", project_path="manual-trigger/smoke",
                       gitlab_project_id=999999)
     db.add(repo)
     await db.flush()
     await db.commit()
     r = await api.post(f"/repositories/{repo.id}/audit")
-    assert r.status_code == 422
-    assert "no LLM endpoint configured" in r.json()["detail"]
+    assert r.status_code == 202, r.text
+    run_id = uuid.UUID(r.json()["audit_run_id"])
+
+    run = await db.get(AuditRun, run_id)
+    assert run.status == "queued" and run.trigger == "manual"
+    job = await db.get(Job, run.job_id)
+    assert (job.kind, job.payload["audit_run_id"]) == ("audit_repo", str(run_id))
 
 
 async def test_trigger_audit_409s_when_already_running(api, db):
     """A second trigger for the same repo while one is 'running' must be
     rejected, not silently start a duplicate concurrent audit."""
-    from argus.domain.models import AuditRun, LLMEndpoint
+    from argus.domain.models import AuditRun
 
     repo = Repository(provider="gitlab", project_path="manual-trigger/inflight",
                       gitlab_project_id=999998)
     db.add(repo)
-    db.add(LLMEndpoint(name="t", provider="openai", model="m", is_default=True))
     await db.flush()
     db.add(AuditRun(repo_id=repo.id, status="running"))
     await db.flush()

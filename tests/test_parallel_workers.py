@@ -30,22 +30,19 @@ def test_malformed_specs_fall_back_instead_of_breaking_startup(caplog):
             assert parse_worker_specs(raw, KINDS) == [WorkerSpec(id="w1", kinds=tuple(KINDS))], raw
 
 
-def test_a_kind_no_worker_claims_is_warned_about(caplog):
+def test_a_kind_no_worker_claims_is_warned_about(caplog, monkeypatch):
+    monkeypatch.setattr(logging.getLogger("argus"), "propagate", True)
     with caplog.at_level(logging.WARNING, logger="argus.jobs"):
         specs = parse_worker_specs('[{"id": "rev", "kinds": ["review"]}]', KINDS)
     assert specs == [WorkerSpec(id="rev", kinds=("review",))]
     assert "distill_mr" in caplog.text
 
 
-def test_audit_repo_is_never_assigned_to_the_default_fallback_worker(caplog):
-    """audit_repo is GPU-2-only and explicit-lane-only by design: an unset or
-    malformed ARGUS_WORKER_SPECS must leave it queued safely, never silently
-    sharing the review/distill fallback worker (and its default LLM
-    endpoint) the way every other kind does."""
+def test_audit_repo_is_assigned_to_the_default_fallback_worker(caplog):
+    """An OSS install with one worker can run audits without a GPU-specific lane."""
     with caplog.at_level(logging.WARNING, logger="argus.jobs"):
         specs = parse_worker_specs("", KINDS + ["audit_repo"])
-    assert specs == [WorkerSpec(id="w1", kinds=("review", "distill_mr"))]
-    assert "audit_repo" in caplog.text
+    assert specs == [WorkerSpec(id="w1", kinds=("review", "distill_mr", "audit_repo"))]
 
 
 async def _review_row(sf, llm_config: dict, tag: str):
@@ -188,6 +185,10 @@ async def test_app_starts_one_loop_per_spec_and_each_claims_only_its_kinds(engin
 
     monkeypatch.setattr(app_module, "execute_review_job", fake_review)
     monkeypatch.setattr(app_module, "_run_distill_mr_job", fake_distill)
+    from argus.knowledge import embedding_jobs
+    async def fake_embedding(*args, **kwargs):
+        return [0.2] * 768
+    monkeypatch.setattr(embedding_jobs, "embed_text", fake_embedding)
     specs = ('[{"id": "rev", "kinds": ["review"], "endpoint": "pw-e2e-vm2"},'
              ' {"id": "dis", "kinds": ["distill_mr"]}]')
     app = app_module.create_app(
@@ -197,7 +198,8 @@ async def test_app_starts_one_loop_per_spec_and_each_claims_only_its_kinds(engin
 
     def _run():
         with TestClient(app):
-            assert len(app.state.workers) == 2
+            assert len(app.state.workers) == 3  # Two configured chat lanes plus vector maintenance.
+            assert app.state.embedding_worker in app.state.workers
             deadline = time.time() + 20
             while time.time() < deadline:
                 done = asyncio.run(_statuses())

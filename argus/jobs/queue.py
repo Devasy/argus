@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from sqlalchemy import or_, select
+from sqlalchemy import case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from argus.domain.models import Job
@@ -15,6 +15,7 @@ logger = logging.getLogger("argus.jobs")
 # for days, so nothing is gained by cutting it fine.
 STALE_LEASE_S = 24 * 3600
 MAX_JOB_ATTEMPTS = 3
+EMBEDDING_LEASE_S = 300  # Provider calls time out at 120s; a dead repair worker need not wait 24h.
 
 # Lower number = claimed first, regardless of age. A bulk enqueue at one
 # priority never blocks a higher one -- a 194-job distill_mr backfill queued
@@ -22,11 +23,8 @@ MAX_JOB_ATTEMPTS = 3
 # plain FIFO. Same tier still drains oldest-first (see claim_next).
 PRIORITY_REVIEW = 0
 PRIORITY_DISTILL = 10
-# Audit doesn't run through this queue (it's its own interval loop in
-# knowledge/audit_scheduler.py, competing for LLM/API capacity but not a
-# worker slot here); this constant exists so a benchmark dry-run review --
-# which DOES share the "review" job kind with real reviews -- ranks behind
-# both, matching audit's intended tier if it's ever folded into this queue.
+# The audit scheduler enqueues audit_repo jobs here. Benchmark dry runs share
+# the review kind, but explicitly select this lower priority too.
 PRIORITY_BENCHMARK_OR_AUDIT = 20
 
 # Only "review" needs a caller-visible default distinct from the fallback:
@@ -34,7 +32,8 @@ PRIORITY_BENCHMARK_OR_AUDIT = 20
 # call site that wants something lower (benchmark/run.py's dry runs) passes
 # its own priority explicitly since it reuses the "review" kind.
 DEFAULT_PRIORITY_BY_KIND = {"review": PRIORITY_REVIEW, "distill_mr": PRIORITY_DISTILL,
-                           "audit_repo": PRIORITY_BENCHMARK_OR_AUDIT}
+                           "audit_repo": PRIORITY_BENCHMARK_OR_AUDIT,
+                           "embed_learning": 30}
 
 
 async def reclaim_stale(session: AsyncSession, stale_after_s: int = STALE_LEASE_S,
@@ -48,9 +47,12 @@ async def reclaim_stale(session: AsyncSession, stale_after_s: int = STALE_LEASE_
     completed work.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_after_s)
+    embedding_cutoff = datetime.now(timezone.utc) - timedelta(
+        seconds=min(stale_after_s, EMBEDDING_LEASE_S))
     rows = (await session.execute(select(Job).where(
         Job.status == "running",
-        or_(Job.locked_at.is_(None), Job.locked_at < cutoff)))).scalars().all()
+        or_(Job.locked_at.is_(None), Job.locked_at < case(
+            (Job.kind == "embed_learning", embedding_cutoff), else_=cutoff))))).scalars().all()
     stats = {"requeued": 0, "failed": 0}
     for job in rows:
         if job.attempts >= max_attempts:
@@ -104,6 +106,9 @@ async def claim_next(session: AsyncSession, worker_id: str,
 async def finish(session: AsyncSession, job: Job, error: str | None) -> None:
     job.status = "failed" if error else "done"
     job.error = error
+    if error and job.kind == "embed_learning" and job.attempts < MAX_JOB_ATTEMPTS:
+        job.status, job.locked_by, job.locked_at = "queued", None, None
+        job.run_after = datetime.now(timezone.utc) + timedelta(seconds=30 * 2 ** job.attempts)
     await session.flush()
 
 

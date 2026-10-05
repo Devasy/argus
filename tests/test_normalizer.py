@@ -11,7 +11,7 @@ FIX = Path(__file__).parent / "fixtures" / "gitlab"
 
 
 def fx(name):
-    return json.loads((FIX / f"{name}.json").read_text())
+    return json.loads((FIX / f"{name}.json").read_text(encoding="utf-8"))
 
 
 async def _make_repo(db):
@@ -31,14 +31,14 @@ async def test_sync_creates_entities(db):
     repo = await _make_repo(db)
     mr = await _sync(db, repo)
     assert mr.mr_iid == 36
-    n_notes = (await db.execute(select(func.count(Note.id)))).scalar()
-    n_disc = (await db.execute(select(func.count(Discussion.id)))).scalar()
-    n_ver = (await db.execute(select(func.count(MRVersion.id)))).scalar()
+    n_notes = (await db.execute(select(func.count(Note.id)).where(Note.mr_id == mr.id))).scalar()
+    n_disc = (await db.execute(select(func.count(Discussion.id)).where(Discussion.mr_id == mr.id))).scalar()
+    n_ver = (await db.execute(select(func.count(MRVersion.id)).where(MRVersion.mr_id == mr.id))).scalar()
     assert n_notes > 20 and n_disc > 10 and n_ver == len(fx("versions"))
     # bot author classified
     bot_notes = (await db.execute(
         select(Note).join(Actor, Note.author_id == Actor.id)
-        .where(Actor.username == "pr_agent"))).scalars().all()
+        .where(Actor.username == "pr_agent", Note.mr_id == mr.id))).scalars().all()
     assert bot_notes and all(n.author_type == "bot" for n in bot_notes)
     # the !36 suggestion note carries its suggestions payload
     sugg = [n for n in bot_notes if n.suggestions]
