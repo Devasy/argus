@@ -170,6 +170,68 @@ wheels = [
 ]
 
 [[package]]
+name = "argus"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "alembic" },
+    { name = "asyncpg" },
+    { name = "fastapi" },
+    { name = "graphifyy" },
+    { name = "greenlet" },
+    { name = "httpx" },
+    { name = "langchain" },
+    { name = "langchain-litellm" },
+    { name = "langfuse" },
+    { name = "langgraph" },
+    { name = "langgraph-checkpoint-postgres" },
+    { name = "litellm" },
+    { name = "pgvector" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "regex" },
+    { name = "sqlalchemy" },
+    { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "respx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.13" },
+    { name = "asyncpg", specifier = ">=0.29" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "graphifyy", specifier = ">=0.9.2" },
+    { name = "greenlet", specifier = ">=3.0" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "langchain", specifier = ">=0.3.14" },
+    { name = "langchain-litellm", specifier = ">=0.1" },
+    { name = "langfuse", specifier = ">=2.50" },
+    { name = "langgraph", specifier = ">=0.2.60" },
+    { name = "langgraph-checkpoint-postgres", specifier = ">=2.0" },
+    { name = "litellm", specifier = ">=1.55" },
+    { name = "pgvector", specifier = ">=0.3.6" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "pydantic", specifier = ">=2.8" },
+    { name = "pydantic-settings", specifier = ">=2.4" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.26.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "regex", specifier = ">=2026.6.28" },
+    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
+    { name = "sqlalchemy", specifier = ">=2.0.35" },
+    { name = "uvicorn", specifier = ">=0.30" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "asyncpg"
 version = "0.31.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1255,66 +1317,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/1a/8a/0402ba61a2f16038b48b39bccca271134be00c5c9f0f623208399333c448/markupsafe-3.0.3-cp314-cp314t-win_amd64.whl", hash = "sha256:4faffd047e07c38848ce017e8725090413cd80cbc23d86e55c587bf979e579c9", size = 15426, upload-time = "2025-09-27T18:37:27.316Z" },
     { url = "https://files.pythonhosted.org/packages/70/bc/6f1c2f612465f5fa89b95bead1f44dcb607670fd42891d8fdcd5d039f4f4/markupsafe-3.0.3-cp314-cp314t-win_arm64.whl", hash = "sha256:32001d6a8fc98c8cb5c947787c5d08b0a50663d139f1305bac5885d98d9b40fa", size = 14146, upload-time = "2025-09-27T18:37:28.327Z" },
 ]
-
-[[package]]
-name = "argus"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "alembic" },
-    { name = "asyncpg" },
-    { name = "fastapi" },
-    { name = "graphifyy" },
-    { name = "greenlet" },
-    { name = "httpx" },
-    { name = "langchain" },
-    { name = "langchain-litellm" },
-    { name = "langfuse" },
-    { name = "langgraph" },
-    { name = "langgraph-checkpoint-postgres" },
-    { name = "litellm" },
-    { name = "pgvector" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pyyaml" },
-    { name = "sqlalchemy" },
-    { name = "uvicorn" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "respx" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "alembic", specifier = ">=1.13" },
-    { name = "asyncpg", specifier = ">=0.29" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "graphifyy", specifier = ">=0.9.2" },
-    { name = "greenlet", specifier = ">=3.0" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "langchain", specifier = ">=0.3.14" },
-    { name = "langchain-litellm", specifier = ">=0.1" },
-    { name = "langfuse", specifier = ">=2.50" },
-    { name = "langgraph", specifier = ">=0.2.60" },
-    { name = "langgraph-checkpoint-postgres", specifier = ">=2.0" },
-    { name = "litellm", specifier = ">=1.55" },
-    { name = "pgvector", specifier = ">=0.3.6" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
-    { name = "pydantic", specifier = ">=2.8" },
-    { name = "pydantic-settings", specifier = ">=2.4" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
-    { name = "sqlalchemy", specifier = ">=2.0.35" },
-    { name = "uvicorn", specifier = ">=0.30" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "multidict"

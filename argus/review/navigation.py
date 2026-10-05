@@ -9,7 +9,7 @@ An outline answers "what is in this file, and at which line" for a few hundred
 tokens instead of several thousand, and a search answers "where is this
 defined" without reading anything.
 
-Deliberately dependency-free: Python files are parsed with the stdlib `ast`
+Python files are parsed with the stdlib `ast`
 (exact), everything else with the same regex approach the graphify module
 already uses for diff headers, and search shells out to ripgrep only when it
 is present, falling back to a pure-Python walk. The runtime image today has
@@ -24,6 +24,8 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+
+import regex
 
 # Directories that are never worth searching or outlining. Walking .git on a
 # large repo costs seconds and returns nothing a reviewer wants.
@@ -195,7 +197,9 @@ def _search_python(workspace: Path, pattern: str, glob: str,
                    deadline: float | None = None) -> list[str]:
     """Pure-Python fallback. Slower than ripgrep but always available, and the
     worktrees involved are single repositories rather than a whole disk."""
-    rx = re.compile(pattern)
+    rx = regex.compile(pattern, regex.VERSION0)
+    if deadline is None:
+        deadline = time.monotonic() + SEARCH_TIMEOUT_S
     out: list[str] = []
     for p in iter_source_files(workspace):
         if deadline is not None and time.monotonic() > deadline:
@@ -217,11 +221,18 @@ def _search_python(workspace: Path, pattern: str, glob: str,
         except OSError:
             continue
         for i, line in enumerate(lines):
-            if deadline is not None and time.monotonic() > deadline:
-                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return out + [f"[search stopped after {SEARCH_TIMEOUT_S}s; results are partial, "
+                              "narrow the pattern or add a glob]"]
             if len(line) > 10000:
                 line = line[:10000]
-            if not rx.search(line):
+            try:
+                matched = rx.search(line, timeout=remaining)
+            except TimeoutError:
+                return out + [f"[search stopped after {SEARCH_TIMEOUT_S}s; results are partial, "
+                              "narrow the pattern or add a glob]"]
+            if not matched:
                 continue
             lo = max(0, i - context)
             hi = min(len(lines), i + context + 1)
@@ -251,5 +262,5 @@ async def search(workspace: Path, pattern: str, glob: str = "",
         # outer bound above ripgrep's own timeout; the review gets control back even if the thread is stuck
         return await asyncio.wait_for(asyncio.to_thread(_sync),
                                       timeout=SEARCH_TIMEOUT_S * 1.5)
-    except (asyncio.TimeoutError, TimeoutError):
+    except TimeoutError:
         return _timed_out_message()

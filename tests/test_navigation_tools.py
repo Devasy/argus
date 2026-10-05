@@ -271,6 +271,20 @@ def test_python_search_stops_at_its_deadline(tmp_path):
     assert any("partial" in h for h in hits)
 
 
+def test_python_search_interrupts_pathological_regex(tmp_path):
+    import time
+    from argus.review import navigation
+
+    (tmp_path / "long.txt").write_text("a" * 9999 + "!\n")
+    started = time.monotonic()
+    hits = navigation._search_python(tmp_path, "(a+)+$", "", 0, 50,
+                                     deadline=started + 0.05)
+    assert time.monotonic() - started < 2
+    assert any("partial" in hit for hit in hits)
+    # The same worker has returned and remains usable for a normal search.
+    assert navigation._search_python(tmp_path, "!", "", 0, 50)
+
+
 async def test_search_returns_when_the_backend_hangs(tmp_path, monkeypatch):
     import time
     from argus.review import navigation
