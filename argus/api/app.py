@@ -311,6 +311,15 @@ def create_app(settings: Settings | None = None,
                 app.state.workers.append(asyncio.create_task(
                     run_worker_forever(sf, handlers, stop, worker_id=spec.id)))
             app.state.worker = app.state.workers[0]
+            # Vector repair must run even when custom chat lanes exclude it,
+            # and must not wait behind an hours-long review on the default lane.
+            from argus.knowledge.embedding_jobs import run_embedding_worker
+            embedding_worker_id = "embedding-maintenance"
+            while embedding_worker_id in {spec.id for spec in specs}:
+                embedding_worker_id += "-1"
+            app.state.embedding_worker = asyncio.create_task(run_embedding_worker(
+                sf, settings, stop, worker_id=embedding_worker_id))
+            app.state.workers.append(app.state.embedding_worker)
 
     @app.on_event("shutdown")
     async def _shutdown():
@@ -321,6 +330,10 @@ def create_app(settings: Settings | None = None,
         auditor_task = getattr(app.state, "auditor", None)
         if auditor_task is not None:
             auditor_task.cancel()
+        embedding_task = getattr(app.state, "embedding_worker", None)
+        if embedding_task is not None:
+            embedding_task.cancel()
+            await asyncio.gather(embedding_task, return_exceptions=True)
 
     @app.get("/health")
     async def health():
@@ -1126,7 +1139,10 @@ def create_app(settings: Settings | None = None,
             run = await session.get(DistillationRun, run_id)
             if run is None:
                 raise HTTPException(404)
-            from argus.domain.models import DistillThread
+            from argus.domain.models import DistillationDecision, DistillThread
+            saved = (await session.execute(select(DistillationDecision).where(
+                DistillationDecision.distillation_run_id == run_id)
+                .order_by(DistillationDecision.created_at, DistillationDecision.id))).scalars().all()
             rows = (await session.execute(select(DistillThread).where(
                 DistillThread.distillation_run_id == run_id)
                 .order_by(DistillThread.created_at))).scalars().all()
@@ -1148,6 +1164,8 @@ def create_app(settings: Settings | None = None,
                 learning_ids=r.learning_ids or [], decision_reason=r.decision_reason,
                 thread=thread_views.get(r.discussion_id))
                 for r in rows]
+            if saved:
+                threads = [DistillThreadOut.model_validate(r.decision) for r in saved]
             return DistillationRunOut(threads=threads,
                 id=run.id, mr_id=run.mr_id, status=run.status, trigger=run.trigger,
                 note_ids=run.note_ids, error=run.error,

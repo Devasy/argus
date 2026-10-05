@@ -346,6 +346,7 @@ async def apply_decisions(sf, settings, repo, mr, threads, decisions, staged,
 
     from argus.domain.models import DistillThread, Learning
     from argus.knowledge.learnings import upsert_learning
+    from argus.knowledge.distillation_history import save_decision
 
     counts = {"created": 0, "updated": 0, "skipped_learnings": 0,
               "threads_done": 0, "threads_failed": 0}
@@ -354,6 +355,7 @@ async def apply_decisions(sf, settings, repo, mr, threads, decisions, staged,
         d = decisions.get(t.discussion_id)
         learning_ids: list[str] = []
         errored = False
+        written = {"created": 0, "updated": 0}
         authors = {n.id: n.author_id for n in t.human_notes}
         staged_for_thread = [s for s in staged if s.discussion_id == t.discussion_id] if d else []
         async with sf() as s:
@@ -379,7 +381,7 @@ async def apply_decisions(sf, settings, repo, mr, threads, decisions, staged,
                     errored = True
                     break
                 learning_ids.append(str(row.id))
-                counts["updated" if target else "created"] += 1
+                written["updated" if target else "created"] += 1
 
             if d is None or errored:
                 await s.rollback()
@@ -395,8 +397,13 @@ async def apply_decisions(sf, settings, repo, mr, threads, decisions, staged,
                     row.distillation_run_id, row.updated_at = distillation_run_id, now
                     row.attempts = (row.attempts or 0) + 1
                     row.status = "failed"
-                    counts["threads_failed"] += 1
+                    row.reply_verdict = row.verdict_reason = None
+                    row.learning_ids = []
+                    row.decision_reason = "Learning write failed" if errored else "No thread decision"
+                    await save_decision(s_fail, distillation_run_id, mr, t,
+                        status="failed", decision_reason=row.decision_reason)
                     await s_fail.commit()
+                    counts["threads_failed"] += 1
             else:
                 row = (await s.execute(select(DistillThread).where(
                     DistillThread.discussion_id == t.discussion_id))).scalar_one_or_none()
@@ -411,7 +418,12 @@ async def apply_decisions(sf, settings, repo, mr, threads, decisions, staged,
                 row.status, row.reply_verdict = "done", d.reply_verdict
                 row.verdict_reason, row.decision_reason = d.verdict_reason, d.reason
                 row.learning_ids = learning_ids
-                counts["threads_done"] += 1
+                await save_decision(s, distillation_run_id, mr, t, status="done",
+                    reply_verdict=d.reply_verdict, verdict_reason=d.verdict_reason,
+                    learning_ids=learning_ids, decision_reason=d.reason)
                 await _apply_verdict_to_bot_notes(s, t, d.reply_verdict)
                 await s.commit()
+                counts["threads_done"] += 1
+                for key, value in written.items():
+                    counts[key] += value
     return counts

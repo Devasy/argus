@@ -50,6 +50,7 @@ def _verdict(run, learning, action, *, verdict="unfalsifiable", suggested=None,
 async def test_approving_a_rewrite_actually_rewrites_the_learning(db, run):
     """The headline fix: this was a no-op."""
     l = _learning(db)
+    l.embedding = [0.3] * 768
     await db.flush()
     v = _verdict(run, l, "flag_for_rewrite",
                  suggested="Wrap GitLab API calls in try/except and log the "
@@ -63,6 +64,7 @@ async def test_approving_a_rewrite_actually_rewrites_the_learning(db, run):
     assert v.applied_at is not None
     # a rewrite must not archive: the learning is being kept, not removed
     assert l.status == "active"
+    assert l.embedding is None
 
 
 @pytest.mark.asyncio
@@ -98,6 +100,7 @@ async def test_merge_can_sharpen_the_survivors_wording(db, run):
     accepts replacement text too."""
     dup = _learning(db, topic="dup", hint="duplicate wording")
     survivor = _learning(db, topic="survivor", hint="old survivor wording")
+    survivor.embedding = [0.3] * 768
     await db.flush()
     dup.hit_count, survivor.hit_count = 3, 5
     v = _verdict(run, dup, "merge", verdict="duplicate_of",
@@ -107,6 +110,7 @@ async def test_merge_can_sharpen_the_survivors_wording(db, run):
 
     assert await apply_verdict(db, v) is True
     assert survivor.hint_text == "combined, sharper wording"
+    assert survivor.embedding is None
     assert dup.status == "archived"
     assert survivor.hit_count == 8      # evidence still folded in
 
@@ -115,6 +119,7 @@ async def test_merge_can_sharpen_the_survivors_wording(db, run):
 async def test_merge_without_suggestion_keeps_survivor_wording(db, run):
     dup = _learning(db, topic="dup", hint="dup")
     survivor = _learning(db, topic="survivor", hint="keep me")
+    survivor.embedding = [0.3] * 768
     await db.flush()
     v = _verdict(run, dup, "merge", verdict="duplicate_of", related=survivor.id)
     db.add(v)
@@ -122,6 +127,7 @@ async def test_merge_without_suggestion_keeps_survivor_wording(db, run):
 
     assert await apply_verdict(db, v) is True
     assert survivor.hint_text == "keep me"
+    assert survivor.embedding is not None
     assert dup.status == "archived"
 
 

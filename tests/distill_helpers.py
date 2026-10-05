@@ -41,7 +41,7 @@ async def _resolved_bot_thread(db, mr):
 
 async def purge_repos(engine, repo_ids) -> None:
     """Delete everything committed under these repos; later tests assert over whole tables."""
-    from sqlalchemy import delete, select
+    from sqlalchemy import String, cast, delete, select
 
     from argus.domain.models import (AgentComplaint, AuditRun, AuditVerdict,
                                          DistillationRun, DistillThread, Feedback, Job,
@@ -63,6 +63,9 @@ async def purge_repos(engine, repo_ids) -> None:
         await conn.execute(delete(Job).where(
             Job.id.in_(select(AuditRun.job_id).where(AuditRun.repo_id.in_(repo_ids),
                                                      AuditRun.job_id.isnot(None)))))
+        await conn.execute(delete(Job).where(Job.kind == "embed_learning",
+            Job.payload["learning_id"].astext.in_(
+                select(cast(Learning.id, String)).where(Learning.repo_id.in_(repo_ids)))))
         await conn.execute(delete(AuditRun).where(AuditRun.repo_id.in_(repo_ids)))
         await conn.execute(delete(Learning).where(Learning.repo_id.in_(repo_ids)))
         await conn.execute(delete(DistillThread).where(DistillThread.mr_id.in_(mr_ids)))

@@ -86,19 +86,25 @@ async def _pending_reconciliation_mr_iids(session: AsyncSession, repo_id,
         .group_by(MRVersion.mr_id)
         .subquery()
     )
+    last_reply_at = (
+        select(Note.mr_id, func.max(Note.note_created_at).label("last_reply_at"))
+        .where(Note.author_type == "human", Note.kind.in_(("inline", "summary")))
+        .group_by(Note.mr_id).subquery()
+    )
     rows = (await session.execute(
         select(MergeRequest.mr_iid)
         .join(Note, Note.mr_id == MergeRequest.id)
         .outerjoin(last_commit_at, last_commit_at.c.mr_id == MergeRequest.id)
+        .outerjoin(last_reply_at, last_reply_at.c.mr_id == MergeRequest.id)
         .where(MergeRequest.repo_id == repo_id,
               Note.author_type == "bot",
               Note.kind == "inline",
               Note.disposition == "open",
               or_(last_commit_at.c.last_commit_at.is_(None),
                   last_commit_at.c.last_commit_at >= cutoff,
-                  MergeRequest.updated_at >= cutoff,
+                  MergeRequest.mr_updated_at >= cutoff,
                   Note.note_created_at >= cutoff,
-                  Note.updated_at >= cutoff))
+                  last_reply_at.c.last_reply_at >= cutoff))
         .distinct()
     )).scalars().all()
     return list(rows)

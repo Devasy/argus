@@ -2,11 +2,63 @@ from typing import Any
 
 from langchain_litellm import ChatLiteLLM
 from langchain_core.messages import BaseMessage
+from pydantic import Field
 
 from argus.llm.config import LLMConfig
 
 
-class _GroqChatLiteLLM(ChatLiteLLM):
+class _FallbackChatLiteLLM(ChatLiteLLM):
+    """Convert the original history separately for each provider."""
+
+    fallback_model: ChatLiteLLM | None = Field(default=None, exclude=True)
+
+    def _generate(self, messages, stop=None, run_manager=None, stream=None, **kwargs):
+        try:
+            return super()._generate(messages, stop=stop, run_manager=run_manager,
+                                     stream=stream, **kwargs)
+        except Exception:
+            if self.fallback_model is None or (self.streaming if stream is None else stream):
+                raise
+            return self.fallback_model._generate(messages, stop=stop,
+                run_manager=run_manager, stream=False, **kwargs)
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, stream=None, **kwargs):
+        try:
+            return await super()._agenerate(messages, stop=stop, run_manager=run_manager,
+                                            stream=stream, **kwargs)
+        except Exception:
+            if self.fallback_model is None or (self.streaming if stream is None else stream):
+                raise
+            return await self.fallback_model._agenerate(messages, stop=stop,
+                run_manager=run_manager, stream=False, **kwargs)
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        started = False
+        try:
+            for chunk in super()._stream(messages, stop=stop, run_manager=run_manager, **kwargs):
+                started = True
+                yield chunk
+        except Exception:
+            if started or self.fallback_model is None:
+                raise
+            yield from self.fallback_model._stream(messages, stop=stop,
+                run_manager=run_manager, **kwargs)
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        started = False
+        try:
+            async for chunk in super()._astream(messages, stop=stop, run_manager=run_manager, **kwargs):
+                started = True
+                yield chunk
+        except Exception:
+            if started or self.fallback_model is None:
+                raise
+            async for chunk in self.fallback_model._astream(messages, stop=stop,
+                    run_manager=run_manager, **kwargs):
+                yield chunk
+
+
+class _GroqChatLiteLLM(_FallbackChatLiteLLM):
     """Groq's API rejects an assistant message that carries
     `reasoning_content` -- 400: "property 'reasoning_content' is
     unsupported". langchain_litellm always re-attaches that field from
@@ -33,7 +85,7 @@ class _GroqChatLiteLLM(ChatLiteLLM):
 def build_chat_model(cfg: LLMConfig, callbacks: list | None = None) -> ChatLiteLLM:
     """Per-instance construction — NEVER mutate litellm module globals."""
     kwargs: dict = dict(model=cfg.model, temperature=cfg.temperature,
-                        callbacks=callbacks or [],
+                        callbacks=list(callbacks or []),
                         # ChatLiteLLM has no `num_retries` field -- passing
                         # that name is silently dropped, which is why this
                         # was a no-op for a while despite the comment below.
@@ -67,13 +119,18 @@ def build_chat_model(cfg: LLMConfig, callbacks: list | None = None) -> ChatLiteL
         # recognizing this model's <think> tag sequences).
         model_kwargs["reasoning_budget_tokens"] = cfg.reasoning_budget_tokens
         model_kwargs["chat_template_kwargs"] = {"enable_thinking": True}
-    if cfg.fallback:
-        # Same passthrough: litellm.completion's own `fallbacks=` kwarg is
-        # read from the top level of the request and, on ANY exception from
-        # the primary model (rate limit, timeout, outage), retries against
-        # the next entry in the list -- no custom retry code needed.
-        model_kwargs["fallbacks"] = [cfg.fallback]
     if model_kwargs:
         kwargs["model_kwargs"] = model_kwargs
-    model_cls = _GroqChatLiteLLM if (cfg.provider == "groq" or (cfg.fallback and cfg.fallback.get("provider") == "groq")) else ChatLiteLLM
+    if cfg.fallback:
+        fallback = cfg.fallback
+        provider = fallback.get("provider") or fallback["model"].split("/", 1)[0]
+        # Legacy local endpoints use the OpenAI wire protocol.
+        if provider not in LLMConfig.model_fields["provider"].annotation.__args__:
+            provider = "openai"
+        fallback_cfg = cfg.model_copy(update={
+            "provider": provider, "model": fallback["model"],
+            "api_base": fallback.get("api_base"), "api_key": fallback.get("api_key"),
+            "fallback": None, "langfuse_handler": None})
+        kwargs["fallback_model"] = build_chat_model(fallback_cfg)
+    model_cls = _GroqChatLiteLLM if cfg.provider == "groq" else _FallbackChatLiteLLM
     return model_cls(**kwargs)

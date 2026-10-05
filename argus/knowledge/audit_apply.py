@@ -110,7 +110,17 @@ async def apply_verdict(session: AsyncSession, verdict: AuditVerdict, *,
     """
     if verdict.state not in ("approved",):
         return False
-    learning = await session.get(Learning, verdict.learning_id)
+    from sqlalchemy import select
+    # Lock merge participants in a stable order so opposite merge requests
+    # cannot deadlock while changing wording and enqueueing repair jobs.
+    ids = {verdict.learning_id}
+    if verdict.proposed_action == "merge" and verdict.related_learning_id:
+        ids.add(verdict.related_learning_id)
+    rows = (await session.execute(select(Learning).where(Learning.id.in_(ids))
+        .order_by(Learning.id).with_for_update()
+        .execution_options(populate_existing=True))).scalars().all()
+    locked = {row.id: row for row in rows}
+    learning = locked.get(verdict.learning_id)
     if learning is None:
         return False
 
@@ -127,13 +137,18 @@ async def apply_verdict(session: AsyncSession, verdict: AuditVerdict, *,
         new_text = (verdict.suggested_hint_text or "").strip()
         if new_text and new_text != (learning.hint_text or "").strip():
             learning.hint_text = new_text
+            # A vector for the old wording must never rank the replacement.
+            learning.embedding = None
+            from argus.knowledge.embedding_jobs import enqueue_embedding
+            await enqueue_embedding(session, learning)
             changed = True
     elif verdict.proposed_action == "merge" and verdict.related_learning_id:
-        survivor = await session.get(Learning, verdict.related_learning_id)
+        survivor = locked.get(verdict.related_learning_id)
         # merging into an archived row archives both; merging across repos cross-contaminates them
         if (survivor is not None and learning.id != survivor.id
                 and survivor.status == "active"
-                and survivor.repo_id == learning.repo_id):
+                and survivor.repo_id == learning.repo_id
+                and survivor.kind == learning.kind):
             # Fold evidence into the survivor so the merge does not throw away
             # the duplicate's accumulated verdicts.
             survivor.hit_count += learning.hit_count
@@ -144,8 +159,11 @@ async def apply_verdict(session: AsyncSession, verdict: AuditVerdict, *,
             # A merge may also sharpen the survivor's wording, since it now
             # has to cover what the duplicate said too.
             merged_text = (verdict.suggested_hint_text or "").strip()
-            if merged_text:
+            if merged_text and merged_text != (survivor.hint_text or "").strip():
                 survivor.hint_text = merged_text
+                survivor.embedding = None
+                from argus.knowledge.embedding_jobs import enqueue_embedding
+                await enqueue_embedding(session, survivor)
             learning.status = "archived"
             changed = True
 

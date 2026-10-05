@@ -69,7 +69,7 @@ async def upsert_learning(session: AsyncSession, settings: Settings, *,
         scope = (Learning.repo_id == repo_id) if repo_id else Learning.repo_id.is_(None)
         nearest = (await session.execute(
             select(Learning, Learning.embedding.cosine_distance(vec).label("d"))
-            .where(scope, Learning.status == "active",
+            .where(scope, Learning.status == "active", Learning.kind == kind,
                    Learning.embedding.isnot(None))
             .order_by("d").limit(1))).first()
         if nearest and nearest[1] is not None and nearest[1] < dedup_threshold:

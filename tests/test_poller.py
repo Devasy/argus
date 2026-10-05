@@ -4,7 +4,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from argus.domain.models import Job, MergeRequest, MRVersion, Note, Repository
 from argus.ingest.poller import _pending_reconciliation_mr_iids, poll_repo
@@ -12,8 +14,21 @@ from argus.ingest.poller import _pending_reconciliation_mr_iids, poll_repo
 FIX = Path(__file__).parent / "fixtures" / "gitlab"
 
 
+@pytest.fixture
+async def db(engine):
+    """poll_repo commits; retain that behavior inside a rollback-only outer transaction."""
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        try:
+            async with AsyncSession(bind=connection, expire_on_commit=False,
+                    join_transaction_mode="create_savepoint") as session:
+                yield session
+        finally:
+            await transaction.rollback()
+
+
 def fx(name):
-    return json.loads((FIX / f"{name}.json").read_text())
+    return json.loads((FIX / f"{name}.json").read_text(encoding="utf-8"))
 
 
 class FakeClient:
@@ -550,7 +565,7 @@ def test_authors_are_argus_people_or_other_bots():
     assert classify_author("pr_agent", set()) == "external_bot", "never a human, even unresolved"
 
 
-async def test_run_poller_forever_one_repo_failure_does_not_block_others(engine, caplog):
+async def test_run_poller_forever_one_repo_failure_does_not_block_others(engine, caplog, monkeypatch):
     """A crash reconciling one repo must not silently skip every repo that
     comes after it in the same tick. Previously all enabled repos shared one
     session for the whole tick, so a failure that left that session's
@@ -562,6 +577,7 @@ async def test_run_poller_forever_one_repo_failure_does_not_block_others(engine,
     output for any repo after the first failure."""
     import asyncio
     import logging
+    monkeypatch.setattr(logging.getLogger("argus"), "propagate", True)
     from argus.db import session_factory
     from argus.ingest.poller import run_poller_forever
 

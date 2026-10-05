@@ -370,7 +370,7 @@ async def test_publish_review_overflow_beyond_budget(db, engine, settings, tmp_p
 
 
 async def test_publish_review_falls_back_to_unanchored_on_positioned_failure(
-        db, engine, settings, tmp_path, caplog):
+        db, engine, settings, tmp_path, caplog, monkeypatch):
     from argus.db import session_factory
     from argus.domain.models import Finding, Note
     from sqlalchemy import select
@@ -390,6 +390,7 @@ async def test_publish_review_falls_back_to_unanchored_on_positioned_failure(
                             max_inline_comments=5)
 
     import logging
+    monkeypatch.setattr(logging.getLogger("argus"), "propagate", True)
     caplog.set_level(logging.WARNING, logger="argus.publisher")
 
     compiled = await publish_review(state, deps)
