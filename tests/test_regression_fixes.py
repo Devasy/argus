@@ -59,7 +59,8 @@ async def test_sweep_does_not_starve_ready_threads_behind_ineligible_mrs(db, mon
     ready_disc = await _resolved_bot_thread(db, ready)
     await db.flush()
     assert await distill_threads.sweep_pending_threads(db, repo, datetime.now(timezone.utc)) == 1
-    ledger = (await db.execute(select(DistillThread))).scalar_one()
+    ledger = (await db.execute(select(DistillThread).where(
+        DistillThread.discussion_id == ready_disc.id))).scalar_one()
     assert ledger.discussion_id == ready_disc.id
 
 

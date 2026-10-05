@@ -1,13 +1,26 @@
 import json
 from pathlib import Path
 
+import pytest
 from sqlalchemy import func, select
 
 from argus.domain.models import (Actor, Discussion, MergeRequest, MRVersion,
                                      Note, Repository)
-from argus.gitlab.normalizer import classify_system_note, sync_merge_request
+from argus.gitlab.normalizer import classify_author, classify_system_note, sync_merge_request
 
 FIX = Path(__file__).parent / "fixtures" / "gitlab"
+
+
+@pytest.mark.parametrize("username", ["bot_tom", "tom-bot", "project_12_bot_a-extra", "group_3_bot_x_extra"])
+def test_bot_like_human_names_require_positive_bot_metadata(username):
+    assert classify_author(username, set()) == "human"
+    assert classify_author(username, set(), is_bot=True) == "external_bot"
+    assert classify_author(username, {username}) == "bot"
+
+
+@pytest.mark.parametrize("username", ["project_12_bot_abc123", "group_3_bot_ABC123"])
+def test_gitlab_token_bot_names_are_detected(username):
+    assert classify_author(username, set()) == "external_bot"
 
 
 def fx(name):

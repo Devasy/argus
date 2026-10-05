@@ -5,6 +5,7 @@ import pytest
 
 from argus.api.app import create_app
 from argus.domain.models import Repository
+from tests.distill_helpers import purge_repos
 
 
 @pytest.fixture
@@ -23,7 +24,7 @@ async def test_trigger_audit_404s_for_unknown_repo(api):
     assert r.status_code == 404
 
 
-async def test_trigger_audit_202s_and_enqueues_a_job(api, db):
+async def test_trigger_audit_202s_and_enqueues_a_job(api, db, engine):
     """Triggering an audit now enqueues an audit_repo job and returns
     immediately -- the LLM call happens later, on the worker."""
     from argus.domain.models import AuditRun, Job
@@ -32,18 +33,22 @@ async def test_trigger_audit_202s_and_enqueues_a_job(api, db):
                       gitlab_project_id=999999)
     db.add(repo)
     await db.flush()
-    await db.commit()
-    r = await api.post(f"/repositories/{repo.id}/audit")
-    assert r.status_code == 202, r.text
-    run_id = uuid.UUID(r.json()["audit_run_id"])
+    try:
+        await db.commit()
+        r = await api.post(f"/repositories/{repo.id}/audit")
+        assert r.status_code == 202, r.text
+        run_id = uuid.UUID(r.json()["audit_run_id"])
 
-    run = await db.get(AuditRun, run_id)
-    assert run.status == "queued" and run.trigger == "manual"
-    job = await db.get(Job, run.job_id)
-    assert (job.kind, job.payload["audit_run_id"]) == ("audit_repo", str(run_id))
+        run = await db.get(AuditRun, run_id)
+        assert run.status == "queued"
+        assert run.trigger == "manual"
+        job = await db.get(Job, run.job_id)
+        assert (job.kind, job.payload["audit_run_id"]) == ("audit_repo", str(run_id))
+    finally:
+        await purge_repos(engine, [repo.id])
 
 
-async def test_trigger_audit_409s_when_already_running(api, db):
+async def test_trigger_audit_409s_when_already_running(api, db, engine):
     """A second trigger for the same repo while one is 'running' must be
     rejected, not silently start a duplicate concurrent audit."""
     from argus.domain.models import AuditRun
@@ -54,10 +59,12 @@ async def test_trigger_audit_409s_when_already_running(api, db):
     await db.flush()
     db.add(AuditRun(repo_id=repo.id, status="running"))
     await db.flush()
-    await db.commit()
-
-    r = await api.post(f"/repositories/{repo.id}/audit")
-    assert r.status_code == 409
+    try:
+        await db.commit()
+        r = await api.post(f"/repositories/{repo.id}/audit")
+        assert r.status_code == 409
+    finally:
+        await purge_repos(engine, [repo.id])
 
 
 async def test_audit_verdicts_expose_both_repos(api, db):

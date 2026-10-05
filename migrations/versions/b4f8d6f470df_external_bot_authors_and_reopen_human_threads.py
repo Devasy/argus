@@ -4,8 +4,8 @@
    poller started without resolving its username. Any account with a 'bot' note
    is ours, so all its notes become 'bot'.
 2. Other review bots (GitLab project tokens) were 'human' and taught "human"
-   learnings. People sign in as fname.lname; every other account becomes
-   'external_bot', which no human or bot query matches.
+   learnings. Only recognized token-bot usernames become 'external_bot',
+   which no human or bot query matches.
 3. The distill_threads seed (b9f263e4cf86) marked every human-only thread done.
    1,820 of them never produced a learning; deleting those ledger rows lets the
    distill sweep read them.
@@ -24,8 +24,8 @@ down_revision: Union[str, Sequence[str], None] = '0126de7d44f5'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-# Same pattern as argus.gitlab.normalizer.HUMAN_USERNAME.
-_TOKEN_BOT = r"^((project|group)_[0-9]+_bot_[0-9a-zA-Z]+|.*[-_]bot$|^bot[-_].*)"
+# Same token-bot format as argus.gitlab.normalizer.TOKEN_BOT_USERNAME.
+_TOKEN_BOT = r"^(project|group)_[0-9]+_bot_[0-9a-zA-Z]+$"
 
 
 def _check(values: str) -> None:

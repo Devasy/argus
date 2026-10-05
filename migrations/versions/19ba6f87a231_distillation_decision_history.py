@@ -34,7 +34,8 @@ def upgrade():
                 'status', status, 'reply_verdict', reply_verdict,
                 'verdict_reason', verdict_reason, 'learning_ids', COALESCE(learning_ids, '[]'::jsonb),
                 'decision_reason', decision_reason), updated_at
-        FROM argus.distill_threads WHERE distillation_run_id IS NOT NULL
+        FROM argus.distill_threads
+        WHERE distillation_run_id IS NOT NULL AND status IN ('done', 'failed')
     """)
 
 

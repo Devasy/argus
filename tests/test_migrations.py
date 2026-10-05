@@ -160,6 +160,14 @@ def test_decision_history_upgrade_preserves_existing_ledger_decisions(migration_
                     distillation_run_id=run.id, content_hash="original-content",
                     thread_type="human_thread", status="done", reply_verdict="accepted",
                     decision_reason="Original decision", learning_ids=[]))
+                for status in ("queued", "failed"):
+                    _, other_mr, other_disc = await _mr_disc(s)
+                    other_run = DistillationRun(mr_id=other_mr.id, note_ids=[], status="done")
+                    s.add(other_run)
+                    await s.flush()
+                    s.add(DistillThread(mr_id=other_mr.id, discussion_id=other_disc.id,
+                        distillation_run_id=other_run.id, content_hash=f"{status}-content",
+                        thread_type="human_thread", status=status, learning_ids=[]))
                 await s.commit()
                 return str(run.id), str(disc.id)
         finally:
@@ -170,13 +178,17 @@ def test_decision_history_upgrade_preserves_existing_ledger_decisions(migration_
         try:
             async with engine.connect() as conn:
                 row = (await conn.execute(text("SELECT distillation_run_id, discussion_id, "
-                    "content_hash, decision FROM argus.distillation_decisions"))).one()
+                    "content_hash, decision FROM argus.distillation_decisions "
+                    "WHERE distillation_run_id = :run_id"), {"run_id": run_id})).one()
                 assert str(row.distillation_run_id) == run_id
                 assert str(row.discussion_id) == discussion_id
                 assert row.content_hash == "original-content"
                 assert row.decision["reply_verdict"] == "accepted"
                 assert row.decision["decision_reason"] == "Original decision"
                 assert "thread" not in row.decision, "migration must not invent historical replies"
+                statuses = (await conn.execute(text(
+                    "SELECT decision->>'status' FROM argus.distillation_decisions"))).scalars().all()
+                assert sorted(statuses) == ["done", "failed"]
         finally:
             await engine.dispose()
 

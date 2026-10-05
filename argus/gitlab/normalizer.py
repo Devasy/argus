@@ -28,8 +28,8 @@ def classify_system_note(body: str) -> str | None:
     return None
 
 
-# Detect GitLab token bots (e.g. project_123_bot_456, group_123_bot_456) or explicit bot usernames.
-TOKEN_BOT_USERNAME = re.compile(r"^(project|group)_\d+_bot_[0-9a-zA-Z]+$|.*[-_]bot$|^bot[-_].*", re.IGNORECASE)
+# Detect only GitLab token bots; other bots need explicit configuration or metadata.
+TOKEN_BOT_USERNAME = re.compile(r"^(project|group)_\d+_bot_[0-9a-zA-Z]+$", re.IGNORECASE)
 
 
 def classify_author(username: str, bot_usernames: set[str], *, is_bot: bool = False) -> str:
