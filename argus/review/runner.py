@@ -110,8 +110,8 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
         review.started_at = datetime.now(timezone.utc)
         llm_cfg = LLMConfig.model_validate(review.llm_config)
         if repo.provider == "github":
-            from argus.providers.settings import require_gemini
-            require_gemini(llm_cfg)
+            from argus.providers.settings import require_free_pilot
+            require_free_pilot(llm_cfg)
             from argus.providers.settings import configure_quota
             configure_quota(llm_cfg, settings)
             review.publish = False

@@ -2,10 +2,13 @@
 from argus.domain.models import Repository
 
 
-def require_gemini(config):
-    if (config.provider != "gemini" or config.fallback is not None
-            or not config.model.startswith("gemini/") or config.api_base):
-        raise ValueError("GitHub pilot requires Gemini without a fallback endpoint")
+def require_free_pilot(config):
+    gemini = config.provider == "gemini" and config.model.startswith("gemini/") and not config.api_base
+    openrouter = (config.provider == "openai"
+                  and (config.api_base or "").rstrip("/") == "https://openrouter.ai/api/v1"
+                  and config.model.startswith("openai/") and config.model.endswith(":free"))
+    if config.fallback is not None or not (gemini or openrouter):
+        raise ValueError("GitHub pilot requires Gemini or an explicit OpenRouter free model without fallback")
     config.free_only = True
     config.num_retries = 0
 
@@ -13,7 +16,9 @@ def require_gemini(config):
 def configure_quota(config, settings):
     if config.free_only:
         config.quota_database_url = settings.database_url
-        config.quota_limits = (settings.gemini_free_rpm, settings.gemini_free_tpm, settings.gemini_free_rpd)
+        # OpenRouter accounts without purchased credits allow 50 free calls daily.
+        daily = min(settings.gemini_free_rpd, 50) if config.provider == "openai" else settings.gemini_free_rpd
+        config.quota_limits = (settings.gemini_free_rpm, settings.gemini_free_tpm, daily)
 
 
 async def settings_for_repository(session, settings, repo_id):

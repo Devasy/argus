@@ -92,8 +92,8 @@ class _GroqChatLiteLLM(_FallbackChatLiteLLM):
         return message_dicts, params
 
 
-class _GeminiChatLiteLLM(_FallbackChatLiteLLM):
-    """Retain Gemini thought signatures when normalized tool calls are serialized."""
+class _QuotaChatLiteLLM(_FallbackChatLiteLLM):
+    """Apply durable request budgets to free cloud endpoints."""
     quota_database_url: str | None = Field(default=None, exclude=True)
     quota_reference: str = "GEMINI_API_KEY"
     quota_limits: tuple[int, int, int] = (5, 16000, 100)
@@ -114,6 +114,10 @@ class _GeminiChatLiteLLM(_FallbackChatLiteLLM):
             delay = re.search(r"retry(?:Delay|_delay| after)?[^0-9]*(\d+)", str(error), re.I)
             raise await pause(self.quota_database_url, self.quota_reference, self.model,
                               int(delay[1]) if delay else 60) from None
+
+
+class _GeminiChatLiteLLM(_QuotaChatLiteLLM):
+    """Retain Gemini thought signatures in tool histories."""
     def _create_message_dicts(self, messages, stop):
         dictionaries, params = super()._create_message_dicts(messages, stop)
         for message, wire in zip(messages, dictionaries):
@@ -175,7 +179,7 @@ def build_chat_model(cfg: LLMConfig, callbacks: list | None = None) -> ChatLiteL
         kwargs["model_kwargs"] = model_kwargs
     if cfg.fallback:
         if cfg.free_only:
-            raise ValueError("free-only Gemini does not permit fallback")
+            raise ValueError("free-only endpoints do not permit fallback")
         fallback = cfg.fallback
         provider = fallback.get("provider") or fallback["model"].split("/", 1)[0]
         # Legacy local endpoints use the OpenAI wire protocol.
@@ -188,7 +192,12 @@ def build_chat_model(cfg: LLMConfig, callbacks: list | None = None) -> ChatLiteL
             "fallback": None, "langfuse_handler": None})
         kwargs["fallback_model"] = build_chat_model(fallback_cfg, callbacks=kwargs["callbacks"])
     model_cls = {"groq": _GroqChatLiteLLM, "gemini": _GeminiChatLiteLLM}.get(cfg.provider, _FallbackChatLiteLLM)
-    if cfg.provider == "gemini" and cfg.free_only:
+    if cfg.free_only:
+        from argus.providers.settings import require_free_pilot
+        require_free_pilot(cfg)
+        kwargs["max_retries"] = 0
+        if cfg.provider != "gemini":
+            model_cls = _QuotaChatLiteLLM
         kwargs.update(quota_database_url=cfg.quota_database_url,
                       quota_reference=cfg.api_key_ref or "GEMINI_API_KEY", quota_limits=cfg.quota_limits)
     return model_cls(**kwargs)

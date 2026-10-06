@@ -12,7 +12,7 @@ from argus.domain.models import RuntimeSetting
 
 
 class QuotaDeferred(RuntimeError):
-    def __init__(self, retry_at, message="Gemini quota exhausted; job deferred"):
+    def __init__(self, retry_at, message="Free model quota exhausted; job deferred"):
         super().__init__(message)
         self.retry_at = retry_at
 

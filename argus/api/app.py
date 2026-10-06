@@ -157,10 +157,10 @@ async def _run_distill_mr_job(sf, settings, payload: dict,
             logger.info("distill job for MR %s has no threads with human notes; skipping", mr_id)
             return
         if repo.provider == "github":
-            from argus.providers.settings import settings_for_repository, require_gemini, configure_quota
+            from argus.providers.settings import settings_for_repository, require_free_pilot, configure_quota
             settings = await settings_for_repository(session, settings, repo.id)
             llm_cfg = await resolve_llm_config(session, repo.default_llm_endpoint_id, None)
-            require_gemini(llm_cfg)
+            require_free_pilot(llm_cfg)
             configure_quota(llm_cfg, settings)
         else:
             llm_cfg = await distill_llm_config(session, endpoint_name)
@@ -1019,10 +1019,10 @@ def create_app(settings: Settings | None = None,
                 cfg = await resolve_llm_config(session, payload.llm_endpoint_id or repo.default_llm_endpoint_id,
                                                proxy_url)
                 if repo.provider == "github":
-                    from argus.providers.settings import require_gemini
-                    require_gemini(cfg)
+                    from argus.providers.settings import require_free_pilot
+                    require_free_pilot(cfg)
                     if proxy_url:
-                        raise ValueError("GitHub pilot uses its repository Gemini endpoint")
+                        raise ValueError("GitHub pilot uses its repository free endpoint")
             except ValueError as e:
                 raise HTTPException(400, str(e))
             profile_version_id = None

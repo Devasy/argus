@@ -109,3 +109,22 @@ References: [GitHub PAT documentation](https://docs.github.com/en/authentication
 [GitHub review API](https://docs.github.com/en/rest/pulls/reviews),
 [Gemini embeddings](https://ai.google.dev/gemini-api/docs/embeddings),
 [Gemini rate limits](https://ai.google.dev/gemini-api/docs/rate-limits).
+
+
+## Optional OpenRouter free endpoint
+
+Set `OPENROUTER_API_KEY` in `.env.prod` and recreate the backend to load it.
+Create a model endpoint with provider `openai`, base URL
+`https://openrouter.ai/api/v1`, model `openai/cohere/north-mini-code:free`,
+and credential reference `OPENROUTER_API_KEY`. Test the endpoint, then select it
+as the repository's default endpoint. Existing queued reviews pin their original
+endpoint; submit a new preview when changing that selection.
+
+The GitHub pilot accepts only explicit `:free` OpenRouter models, without fallback.
+It shares the conservative Gemini RPM and TPM settings and caps the local daily
+request budget at 50. Server rate limits defer the job. The advertised model
+context can exceed the configured per-request budget; Argus retains the smaller
+context limit for this pilot. Retrieval still uses Gemini embeddings.
+
+See [OpenRouter free limits](https://openrouter.ai/docs/api_reference/limits)
+and the [North Mini Code model page](https://openrouter.ai/cohere/north-mini-code:free).

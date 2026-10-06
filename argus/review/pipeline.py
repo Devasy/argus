@@ -212,6 +212,9 @@ def _model(deps: PipelineDeps, review_id: str, stage_name: str,
         if deps.llm_cfg.provider == "gemini" and not model_override.startswith("gemini/"):
             raise ValueError("GitHub Gemini specialist overrides must use a Gemini model")
         llm_cfg = llm_cfg.model_copy(update={"model": model_override})
+        if llm_cfg.free_only:
+            from argus.providers.settings import require_free_pilot
+            require_free_pilot(llm_cfg)
     # llm_cfg.langfuse_handler is already bound onto the model itself (see
     # build_chat_model), which is enough for LLM generation spans -- but a
     # callback bound only to the chat model does not propagate to a

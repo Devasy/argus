@@ -174,9 +174,9 @@ def integrations_router(sf, settings, require_user, require_admin):
                 raise HTTPException(404, "endpoint not found")
             cfg = await resolve_llm_config(s, endpoint_id, None)
         cfg.timeout, cfg.num_retries = 30, 0
-        if cfg.provider == "gemini":
-            from argus.providers.settings import require_gemini, configure_quota
-            require_gemini(cfg)
+        if cfg.provider == "gemini" or (cfg.api_base or "").rstrip("/") == "https://openrouter.ai/api/v1":
+            from argus.providers.settings import require_free_pilot, configure_quota
+            require_free_pilot(cfg)
             configure_quota(cfg, settings)
         try:
             from langchain_core.messages import HumanMessage, ToolMessage
