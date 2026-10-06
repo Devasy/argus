@@ -231,3 +231,23 @@ def test_free_openrouter_budget_is_independent_of_gemini():
     configure_quota(cfg, Settings(gemini_free_tpm=1000, openrouter_free_tpm=131072,
                                   openrouter_free_rpd=500))
     assert cfg.quota_limits == (5, 131072, 50)
+
+
+async def test_github_openrouter_uses_provider_context_budget():
+    from types import SimpleNamespace
+    from argus.config import Settings
+    from argus.domain.models import Repository
+    from argus.providers.settings import settings_for_repository
+    repo = SimpleNamespace(provider="github", embedding_config={}, default_llm_endpoint_id="endpoint")
+    endpoint = SimpleNamespace(base_url="https://openrouter.ai/api/v1")
+
+    class Session:
+        async def get(self, model, identifier):
+            return repo if model is Repository else endpoint
+
+    settings = Settings(model_context_window=130000, gemini_free_tpm=16000,
+                        openrouter_free_tpm=131072)
+    scoped = await settings_for_repository(Session(), settings, "repo")
+    assert scoped.model_context_window == 130000
+    assert settings.model_context_window == 130000
+    assert scoped.repository_knowledge_only is True
