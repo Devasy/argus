@@ -158,7 +158,7 @@ def eligible(discussion: dict, bot: str, bot_note_ids: set[int], history: dict,
     return first, ("claimed" if human else "silent")
 
 
-async def follow_up_prior_comments(sf, gitlab, project_id: int, mr_iid: int, mr_db_id,
+async def follow_up_prior_comments(sf, gitlab, project_id: int | str, mr_iid: int, mr_db_id,
                                    head_sha: str, workspace: Path, llm_cfg, mode: str
                                    ) -> FollowupStats:
     stats = FollowupStats()

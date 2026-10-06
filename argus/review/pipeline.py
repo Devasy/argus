@@ -118,7 +118,7 @@ class PipelineDeps(BaseModel):
     # the earlier stages should not pay for it.
     verify_context: str = ""
     gitlab: object | None = None
-    project_id: int = 0
+    project_id: int | str = 0
     mr_iid: int = 0
     diff_refs: dict = {}
     mr_db_id: uuid.UUID | None = None

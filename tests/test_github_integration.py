@@ -34,6 +34,18 @@ def test_import_url():
     assert parse_github_url("https://github.com/o/r/pull/42/") == ("o/r", 42)
 
 
+@pytest.mark.parametrize("project", [123, "Devasy/argus"])
+def test_pipeline_accepts_provider_project_keys(settings, tmp_path, project):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from argus.review.pipeline import PipelineDeps
+    from argus.review.tools import ToolContext
+    deps = PipelineDeps(sf=async_sessionmaker(), settings=settings,
+        llm_cfg=LLMConfig(provider="gemini", model="gemini/test"),
+        tool_ctx=ToolContext(workspace=tmp_path, files_by_id={}, hunks={}),
+        profile_static="Review public code", mr_context="Public PR", project_id=project)
+    assert deps.project_id == project
+
+
 async def test_github_pagination_and_private_repository_rejection(settings, respx_mock):
     provider = GitHubProvider(settings)
     respx_mock.get("https://api.github.com/repos/o/r").respond(200, json={"private": True})
