@@ -338,7 +338,8 @@ async def test_gemini_embedding_profile_dimension_and_normalization(settings, re
     assert vector[:2] == [.6, .8] and len(vector) == 768
 
 
-async def test_selected_import_and_repository_model_routing(engine, settings, respx_mock, monkeypatch):
+@pytest.mark.parametrize("provider_kind", ["gemini", "vertex_ai"])
+async def test_selected_import_and_repository_model_routing(engine, settings, respx_mock, monkeypatch, provider_kind):
     from argus.api.app import create_app
     from argus.domain.models import RawEvent, MRParticipant
     config = settings.model_copy(update={"github_token": "unit-test-pat", "poller_enabled": False, "worker_enabled": False})
@@ -360,6 +361,12 @@ async def test_selected_import_and_repository_model_routing(engine, settings, re
         "reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}}})
     sf = session_factory(engine)
     repo_id = None
+    if provider_kind == "vertex_ai":
+        config = config.model_copy(update={"github_llm_endpoint_name": "github-vertex-credits"})
+        async with sf() as session:
+            session.add(LLMEndpoint(name="github-vertex-credits", provider="vertex_ai",
+                model="vertex_ai/gemini-3.8-flash", api_key_ref="VERTEX_API_KEY"))
+            await session.commit()
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(config, engine)), base_url="http://test") as client:
             response = await client.post("/imports/github-pull-request", json={"url": "https://github.com/o/r/pull/1"})
@@ -378,8 +385,8 @@ async def test_selected_import_and_repository_model_routing(engine, settings, re
                 repo = await session.get(Repository, repo_id)
                 assert repo.poll_cursor["selected_iids"] == [1]
                 row = await session.get(Review, uuid.UUID(triggered.json()["review_id"]))
-                assert row.publish is False and row.llm_config["provider"] == "gemini"
-                assert row.llm_config["api_key_ref"] == "GEMINI_API_KEY"
+                assert row.publish is False and row.llm_config["provider"] == provider_kind
+                assert row.llm_config["api_key_ref"] == ("VERTEX_API_KEY" if provider_kind == "vertex_ai" else "GEMINI_API_KEY")
                 assert "api_key" not in row.llm_config
                 job = (await session.execute(select(Job).where(Job.payload["review_id"].astext == str(row.id)))).scalar_one()
                 assert job.payload["pinned"] is True
@@ -396,7 +403,7 @@ async def test_selected_import_and_repository_model_routing(engine, settings, re
                 await connection.execute(delete(RawEvent).where(RawEvent.repo_id == repo_id))
                 await connection.execute(delete(MergeRequest).where(MergeRequest.repo_id == repo_id))
                 await connection.execute(delete(Repository).where(Repository.id == repo_id))
-                await connection.execute(delete(LLMEndpoint).where(LLMEndpoint.name == "github-gemini-free"))
+                await connection.execute(delete(LLMEndpoint).where(LLMEndpoint.name == config.github_llm_endpoint_name))
                 await connection.execute(delete(Actor).where(Actor.provider == "github", Actor.provider_user_id == USER["id"]))
 
 
@@ -449,3 +456,34 @@ async def test_gemini_429_defers_model_and_persists_shared_cooldown(engine, sett
     finally:
         async with engine.begin() as connection:
             await connection.execute(delete(RuntimeSetting).where(RuntimeSetting.key == key))
+
+
+@pytest.mark.parametrize("method,path,kwargs", [
+    ("GET", "/user", {}),
+    ("POST", "/graphql", {"json": {"query": "query { viewer { login } }"}}),
+])
+async def test_github_read_timeout_retries(settings, respx_mock, monkeypatch, method, path, kwargs):
+    import asyncio
+    async def no_wait(seconds):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    route = respx_mock.request(method, "https://api.github.com" + path).mock(
+        side_effect=[httpx.ReadTimeout(""), httpx.Response(200, json={"ok": True})])
+    provider = GitHubProvider(settings)
+    try:
+        assert (await provider._request(method, path, **kwargs)).json() == {"ok": True}
+        assert route.call_count == 2
+    finally:
+        await provider.aclose()
+
+
+async def test_github_write_timeout_is_not_retried(settings, respx_mock):
+    route = respx_mock.post("https://api.github.com/repos/o/r/pulls/1/reviews").mock(
+        side_effect=httpx.ReadTimeout(""))
+    provider = GitHubProvider(settings)
+    try:
+        with pytest.raises(httpx.ReadTimeout):
+            await provider._request("POST", "/repos/o/r/pulls/1/reviews", json={"body": "review"})
+        assert route.call_count == 1
+    finally:
+        await provider.aclose()

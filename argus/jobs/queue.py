@@ -151,7 +151,7 @@ async def run_worker_forever(sf: async_sessionmaker, handlers: dict[str, Callabl
                 logger.info("job %s deferred until %s", job_id, e.retry_at)
             else:
                 logger.exception("job %s failed", job_id)
-                error = str(e)[:2000]
+                error = (str(e) or type(e).__name__)[:2000]
         finally:
             async with sf() as session:
                 job = await session.get(Job, job_id)

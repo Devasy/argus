@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMe } from "../../../api/queries";
 import { api } from "../../../api/client";
 import type { ModelEndpoint } from "../../../api/types";
 import ErrorBox from "../../../components/ErrorBox";
@@ -15,6 +16,8 @@ const empty = {
 
 export default function EndpointsSection() {
   const qc = useQueryClient();
+  const me = useMe();
+  const isAdmin = me.data?.role === "admin";
   const rows = useQuery({ queryKey: ["model-endpoints"], queryFn: api.modelEndpoints });
   const [draft, setDraft] = useState<Omit<ModelEndpoint, "id" | "secret_present">>(empty);
   const [editing, setEditing] = useState<string>();
@@ -36,6 +39,7 @@ export default function EndpointsSection() {
         GitHub imports use the configured repository endpoint. Supported options include Gemini,
         OpenRouter free models, and Vertex AI with Cloud billing credits.
       </p>
+      {!isAdmin && <p className="muted">Sign in with an admin token to add, edit, or test endpoints.</p>}
       {rows.isPending && <p role="status">Loading endpoints…</p>}
       {rows.error && <ErrorBox message={rows.error.message} />}
       {(rows.data ?? []).map((row) => (
@@ -49,6 +53,7 @@ export default function EndpointsSection() {
           <div className="row" style={{ gap: 8 }}>
             <button
               className="btn-o"
+              disabled={!isAdmin}
               onClick={() => {
                 setEditing(row.id);
                 setDraft(row);
@@ -59,7 +64,7 @@ export default function EndpointsSection() {
             </button>
             <button
               className="btn-o"
-              disabled={probe.isPending}
+              disabled={!isAdmin || probe.isPending}
               onClick={() => {
                 setProbeMessage("");
                 probe.mutate(row.id);
@@ -90,7 +95,7 @@ export default function EndpointsSection() {
         <p className="muted">
           api key ref is the environment variable name. Credentials stay on the server.
         </p>
-        <button className="btn-p" disabled={save.isPending}>
+        <button className="btn-p" disabled={!isAdmin || save.isPending}>
           {save.isPending ? "Saving…" : editing ? "Save endpoint" : "Add endpoint"}
         </button>
         {editing && (

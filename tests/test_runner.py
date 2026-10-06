@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
+import httpx
 
 from argus.db import session_factory
 from argus.domain.models import (LLMRound, MergeRequest, Repository,
@@ -9,12 +10,13 @@ from argus.domain.models import (LLMRound, MergeRequest, Repository,
 from argus.review.runner import execute_review_job
 
 
+@pytest.mark.parametrize("failure", [RuntimeError("simulated gitlab failure"), httpx.ReadTimeout("")])
 async def test_execute_review_job_aggregates_llm_round_tokens_on_completion(
-        db, engine, settings, monkeypatch):
+        db, engine, settings, monkeypatch, failure):
     sf = session_factory(engine)
     async with sf() as s:
-        repo = Repository(provider="gitlab", project_path="grp/runner-agg-test",
-                          gitlab_project_id=90000600)
+        repo = Repository(provider="gitlab", project_path=f"grp/runner-agg-test-{type(failure).__name__}",
+                          gitlab_project_id=90000600 if isinstance(failure, RuntimeError) else 90000601)
         s.add(repo); await s.flush()
         mr = MergeRequest(repo_id=repo.id, mr_iid=9, title="t", state="opened",
                           source_branch="a", target_branch="b", head_sha="s",
@@ -28,7 +30,7 @@ async def test_execute_review_job_aggregates_llm_round_tokens_on_completion(
         await s.commit()
 
     async def fake_get_merge_request(self, project_id, mr_iid):
-        raise RuntimeError("simulated gitlab failure — no network in this test")
+        raise failure
 
     from argus.gitlab.client import GitLabClient
     monkeypatch.setattr(GitLabClient, "get_merge_request", fake_get_merge_request)
@@ -42,12 +44,13 @@ async def test_execute_review_job_aggregates_llm_round_tokens_on_completion(
                        prompt_tokens=50, completion_tokens=20))
         await s.commit()
 
-    with pytest.raises(RuntimeError, match="simulated gitlab failure"):
+    with pytest.raises(type(failure)):
         await execute_review_job(sf, settings, {"review_id": str(review_id)})
 
     async with sf() as s:
         updated = await s.get(Review, review_id)
         assert updated.status == "failed"
+        assert updated.error
         assert updated.prompt_tokens == 250
         assert updated.completion_tokens == 100
 

@@ -290,7 +290,7 @@ class LLMEndpoint(Base):
     __tablename__ = "llm_endpoints"
     __table_args__ = (
         CheckConstraint(
-            "provider IN ('anthropic','openai','gemini','ollama','claude_cli_proxy','groq')",
+            "provider IN ('anthropic','openai','gemini','ollama','claude_cli_proxy','groq','vertex_ai')",
             name="endpoint_provider_check"),
     )
     id: Mapped[uuid.UUID] = _uuid_pk()

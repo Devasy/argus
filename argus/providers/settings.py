@@ -31,13 +31,15 @@ def configure_quota(config, settings):
 
 
 
-async def settings_for_repository(session, settings, repo_id):
+async def settings_for_repository(session, settings, repo_id, llm_config=None):
     repo = await session.get(Repository, repo_id) if repo_id else None
     if repo is None or repo.provider != "github":
         return settings
     embedding = repo.embedding_config or {}
     endpoint = await session.get(LLMEndpoint, repo.default_llm_endpoint_id) if repo.default_llm_endpoint_id else None
-    budget = settings.openrouter_free_tpm if endpoint and (endpoint.base_url or "").rstrip("/") == "https://openrouter.ai/api/v1" else settings.gemini_free_tpm
+    endpoint = llm_config or endpoint
+    base = getattr(endpoint, "api_base", None) if llm_config else getattr(endpoint, "base_url", None)
+    budget = settings.openrouter_free_tpm if endpoint and (base or "").rstrip("/") == "https://openrouter.ai/api/v1" else settings.gemini_free_tpm
     if endpoint and getattr(endpoint, "provider", None) == "vertex_ai":
         budget = settings.vertex_tpm
     return settings.model_copy(update={

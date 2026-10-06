@@ -67,3 +67,16 @@ async def test_vertex_health_avoids_local_server_probes():
     from argus.llm.health import check_llm_health, resolve_served_model
     assert await check_llm_health(config(api_base=VERTEX_API_BASE)) is True
     assert await resolve_served_model(config(api_base=VERTEX_API_BASE)) == "vertex_ai/gemini-3.8-flash"
+
+
+async def test_pinned_vertex_context_overrides_repository_free_default():
+    repo = SimpleNamespace(provider="github", embedding_config={}, default_llm_endpoint_id="free")
+    default = SimpleNamespace(provider="gemini", base_url=None)
+    class Session:
+        async def get(self, model, identifier):
+            return repo if model is Repository else default
+    settings = Settings(model_context_window=130000, gemini_free_tpm=16000)
+    scoped = await settings_for_repository(Session(), settings, "repo", config())
+    assert scoped.model_context_window == 130000
+    free = LLMConfig(provider="gemini", model="gemini/test")
+    assert (await settings_for_repository(Session(), settings, "repo", free)).model_context_window == 16000

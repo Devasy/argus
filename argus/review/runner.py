@@ -105,10 +105,10 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
         mr = await s.get(MergeRequest, review.mr_id)
         repo = await s.get(Repository, mr.repo_id)
         from argus.providers.settings import settings_for_repository
-        settings = await settings_for_repository(s, settings, repo.id)
+        llm_cfg = LLMConfig.model_validate(review.llm_config)
+        settings = await settings_for_repository(s, settings, repo.id, llm_cfg)
         review.status = "running"
         review.started_at = datetime.now(timezone.utc)
-        llm_cfg = LLMConfig.model_validate(review.llm_config)
         if repo.provider == "github":
             from argus.providers.settings import require_pilot_endpoint
             require_pilot_endpoint(llm_cfg)
@@ -381,7 +381,7 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
             logger.info("review %s canceled", review_id)
         else:
             logger.exception("review %s failed", review_id)
-            error = str(e)[:2000]
+            error = (str(e) or type(e).__name__)[:2000]
         raise
     finally:
         review_span_stack.close()

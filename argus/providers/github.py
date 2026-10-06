@@ -1,4 +1,5 @@
 """GitHub REST/GraphQL adapter; all GitHub wire formats stop here."""
+import asyncio
 import base64
 import re
 from urllib.parse import quote, urlparse
@@ -50,7 +51,7 @@ class GitHubProvider:
         if self.auth and not (settings.github_installation_id and settings.github_app_private_key_path):
             raise ValueError("GitHub App requires installation ID and private key path")
         self._thread_roots = {}
-        self._http = httpx.AsyncClient(base_url=API, timeout=30,
+        self._http = httpx.AsyncClient(base_url=API, timeout=httpx.Timeout(60, connect=15),
             headers={"Accept": "application/vnd.github+json",
                      "X-GitHub-Api-Version": "2022-11-28",
                      **({"Authorization": f"Bearer {settings.github_token}"}
@@ -78,9 +79,19 @@ class GitHubProvider:
     async def _request(self, method, path, **kwargs):
         if self.auth:
             kwargs["headers"] = {**kwargs.get("headers", {}), "Authorization": f"Bearer {await self.auth.token()}"}
-        r = await self._http.request(method, path, **kwargs)
-        r.raise_for_status()
-        return r
+        read_only = method.upper() in {"GET", "HEAD"} or (
+            method.upper() == "POST" and path == "/graphql"
+            and (kwargs.get("json", {}).get("query", "").lstrip().startswith("query")))
+        attempts = 3 if read_only else 1
+        for attempt in range(attempts):
+            try:
+                r = await self._http.request(method, path, **kwargs)
+                r.raise_for_status()
+                return r
+            except httpx.TransportError:
+                if attempt + 1 == attempts:
+                    raise
+                await asyncio.sleep(.5 * 2 ** attempt)
 
     async def _get(self, path, **params):
         return (await self._request("GET", path, params=params)).json()
