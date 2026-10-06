@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     gemini_free_rpm: int = 5
     gemini_free_tpm: int = 16000
     gemini_free_rpd: int = 100
+    openrouter_free_rpm: int = 5
+    openrouter_free_tpm: int = 131072
+    openrouter_free_rpd: int = 50
 
     embedding_model: str = "ollama/nomic-embed-text"
     embedding_dim: int = 768

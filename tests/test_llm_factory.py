@@ -222,3 +222,12 @@ async def test_free_openrouter_reserves_before_request(monkeypatch):
     assert await model._agenerate([HumanMessage(content="hello")]) == "ok"
     assert [event[0] for event in events] == ["reserve", "request"]
     assert events[0][2] == (5, 16000, 50)
+
+
+def test_free_openrouter_budget_is_independent_of_gemini():
+    from argus.config import Settings
+    from argus.providers.settings import configure_quota
+    cfg = _cfg(provider="openai", free_only=True)
+    configure_quota(cfg, Settings(gemini_free_tpm=1000, openrouter_free_tpm=131072,
+                                  openrouter_free_rpd=500))
+    assert cfg.quota_limits == (5, 131072, 50)

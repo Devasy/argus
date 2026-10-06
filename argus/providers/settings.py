@@ -1,5 +1,5 @@
 """Repository overrides keep an OSS pilot isolated in a shared installation."""
-from argus.domain.models import Repository
+from argus.domain.models import Repository, LLMEndpoint
 
 
 def require_free_pilot(config):
@@ -16,9 +16,12 @@ def require_free_pilot(config):
 def configure_quota(config, settings):
     if config.free_only:
         config.quota_database_url = settings.database_url
-        # OpenRouter accounts without purchased credits allow 50 free calls daily.
-        daily = min(settings.gemini_free_rpd, 50) if config.provider == "openai" else settings.gemini_free_rpd
-        config.quota_limits = (settings.gemini_free_rpm, settings.gemini_free_tpm, daily)
+        if config.provider == "openai":
+            config.quota_limits = (settings.openrouter_free_rpm, settings.openrouter_free_tpm,
+                                   min(settings.openrouter_free_rpd, 50))
+        else:
+            config.quota_limits = (settings.gemini_free_rpm, settings.gemini_free_tpm, settings.gemini_free_rpd)
+
 
 
 async def settings_for_repository(session, settings, repo_id):
@@ -26,10 +29,12 @@ async def settings_for_repository(session, settings, repo_id):
     if repo is None or repo.provider != "github":
         return settings
     embedding = repo.embedding_config or {}
+    endpoint = await session.get(LLMEndpoint, repo.default_llm_endpoint_id) if repo.default_llm_endpoint_id else None
+    budget = settings.openrouter_free_tpm if endpoint and (endpoint.base_url or "").rstrip("/") == "https://openrouter.ai/api/v1" else settings.gemini_free_tpm
     return settings.model_copy(update={
         "embedding_model": embedding.get("model", "gemini-embedding-2"),
         "embedding_dim": embedding.get("dim", 768),
         "embedding_api_key_ref": embedding.get("api_key_ref", "GEMINI_API_KEY"),
         "repository_knowledge_only": True, "followup_mode": "off",
         "audit_max_parallel": 1,
-        "model_context_window": min(settings.model_context_window, settings.gemini_free_tpm)})
+        "model_context_window": min(settings.model_context_window, budget)})

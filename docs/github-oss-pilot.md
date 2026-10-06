@@ -121,10 +121,11 @@ as the repository's default endpoint. Existing queued reviews pin their original
 endpoint; submit a new preview when changing that selection.
 
 The GitHub pilot accepts only explicit `:free` OpenRouter models, without fallback.
-It shares the conservative Gemini RPM and TPM settings and caps the local daily
-request budget at 50. Server rate limits defer the job. The advertised model
-context can exceed the configured per-request budget; Argus retains the smaller
-context limit for this pilot. Retrieval still uses Gemini embeddings.
+Configure `ARGUS_OPENROUTER_FREE_RPM`, `ARGUS_OPENROUTER_FREE_TPM`, and
+`ARGUS_OPENROUTER_FREE_RPD` independently from Gemini (defaults: 5, 131072, 50).
+The local daily request budget is capped at 50. Server rate limits defer the job. The advertised model
+context can exceed the configured per-request budget; Argus uses the smaller
+of its global context setting and the selected provider input budget. Retrieval still uses Gemini embeddings.
 
 See [OpenRouter free limits](https://openrouter.ai/docs/api_reference/limits)
 and the [North Mini Code model page](https://openrouter.ai/cohere/north-mini-code:free).
