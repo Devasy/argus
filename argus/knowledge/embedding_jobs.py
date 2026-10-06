@@ -16,7 +16,8 @@ from sqlalchemy import String, cast, exists, or_, select, update
 
 from argus.domain.models import EMBEDDING_DIM, Job, Learning
 from argus.jobs.queue import enqueue, run_worker_forever
-from argus.knowledge.embeddings import EmbeddingError, embed_text
+from argus.knowledge.embeddings import EmbeddingError, embed_text, embedding_fingerprint
+from argus.providers.settings import settings_for_repository
 
 logger = logging.getLogger("argus.embedding_jobs")
 REPAIR_LIMIT = 100
@@ -40,6 +41,10 @@ async def enqueue_embedding(session, learning):
 async def run_embedding_job(sf, settings, payload):
     learning_id = uuid.UUID(payload["learning_id"])
     async with sf() as s:
+        learning = await s.get(Learning, learning_id)
+        if learning is None:
+            return
+        settings = await settings_for_repository(s, settings, learning.repo_id)
         row = (await s.execute(select(Learning.topic, Learning.hint_text).where(
             Learning.id == learning_id, Learning.status == "active",
             Learning.embedding.is_(None)))).first()
@@ -56,7 +61,8 @@ async def run_embedding_job(sf, settings, payload):
         await s.execute(update(Learning).where(
             Learning.id == learning_id, Learning.status == "active",
             Learning.embedding.is_(None), Learning.topic == topic,
-            Learning.hint_text == hint_text).values(embedding=vector))
+            Learning.hint_text == hint_text).values(embedding=vector,
+                embedding_fingerprint=embedding_fingerprint(settings)))
         await s.commit()
 
 

@@ -135,6 +135,7 @@ async def run_worker_forever(sf: async_sessionmaker, handlers: dict[str, Callabl
                 pass
             continue
         error = None
+        deferred = None
         interrupted = False
         try:
             await handlers[kind](payload)
@@ -144,12 +145,21 @@ async def run_worker_forever(sf: async_sessionmaker, handlers: dict[str, Callabl
             interrupted = True
             raise
         except Exception as e:
-            logger.exception("job %s failed", job_id)
-            error = str(e)[:2000]
+            from argus.llm.quota import QuotaDeferred
+            if isinstance(e, QuotaDeferred):
+                deferred = e
+                logger.info("job %s deferred until %s", job_id, e.retry_at)
+            else:
+                logger.exception("job %s failed", job_id)
+                error = (str(e) or type(e).__name__)[:2000]
         finally:
             async with sf() as session:
                 job = await session.get(Job, job_id)
-                if interrupted:
+                if deferred:
+                    job.status, job.locked_by, job.locked_at = "queued", None, None
+                    job.run_after, job.error = deferred.retry_at, str(deferred)
+                    job.attempts = max(0, job.attempts - 1)
+                elif interrupted:
                     # Queued, not failed: a review resumes from its LangGraph
                     # checkpoint and keeps every stage it already finished.
                     job.status, job.locked_by, job.locked_at = "queued", None, None

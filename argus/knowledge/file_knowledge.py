@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from argus.config import Settings
 from argus.domain.models import FileKnowledge
-from argus.knowledge.embeddings import embed_text
+from argus.knowledge.embeddings import embed_text, embedding_fingerprint
+from argus.providers.settings import settings_for_repository
 
 
 async def get_blob_sha(workspace: Path, path: str) -> str | None:
@@ -45,6 +46,8 @@ async def remember(session: AsyncSession, settings: Settings, *, repo_id,
         notes.append({"note": append_note, "review_id": str(review_id) if review_id else None,
                       "at": datetime.now(timezone.utc).isoformat()})
         row.notes = notes
+    settings = await settings_for_repository(session, settings, repo_id)
+    row.embedding_fingerprint = embedding_fingerprint(settings)
     row.embedding = await embed_text(f"{path}\n{summary}", settings, is_query=False)
     await session.flush()
     return row

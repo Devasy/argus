@@ -2,7 +2,7 @@ import os
 import uuid
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,10 +15,14 @@ class LLMConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     provider: Literal["anthropic", "openai", "gemini", "ollama",
-                     "claude_cli_proxy", "groq"]
+                     "claude_cli_proxy", "groq", "vertex_ai"]
     model: str
     api_base: str | None = None
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, exclude=True)
+    api_key_ref: str | None = None
+    free_only: bool = False
+    quota_database_url: str | None = Field(default=None, exclude=True)
+    quota_limits: tuple[int, int, int] = (5, 16000, 100)
     temperature: float = 0.1
     timeout: float | None = None
     supports_prompt_cache: bool = False
@@ -37,6 +41,10 @@ class LLMConfig(BaseModel):
     # retry deterministic 4xx (context-window, bad request), so this cannot
     # mask a real error into a slow one.
     num_retries: int = 3
+
+    @field_serializer("fallback")
+    def serialize_fallback(self, value):
+        return {k: v for k, v in value.items() if k != "api_key"} if value else None
 
 
 async def resolve_llm_config(session: AsyncSession,
@@ -60,10 +68,13 @@ async def resolve_llm_config(session: AsyncSession,
         if fb is not None:
             fallback = {
                 "provider": fb.provider,
+                "api_key_ref": fb.api_key_ref,
                 "model": fb.model, "api_base": fb.base_url,
                 "api_key": os.environ.get(fb.api_key_ref) if fb.api_key_ref else None,
             }
     return LLMConfig(provider=ep.provider, model=ep.model, api_base=ep.base_url,
+                     temperature=1.0 if ep.provider == "gemini" else 0.1,
+                     api_key_ref=ep.api_key_ref,
                      api_key=api_key, fallback=fallback,
                      supports_prompt_cache=(ep.provider == "anthropic"))
 

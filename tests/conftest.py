@@ -16,6 +16,9 @@ def _clean_secret_env_vars(monkeypatch):
     monkeypatch.setenv("ARGUS_DISTILLER_API_KEY", "")
     monkeypatch.setenv("ARGUS_API_TOKEN", "")
     monkeypatch.setenv("ARGUS_GITLAB_TOKEN", "")
+    monkeypatch.setenv("ARGUS_GITHUB_TOKEN", "")
+    monkeypatch.setenv("ARGUS_GITHUB_APP_ID", "")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.setenv("ARGUS_LANGFUSE_PUBLIC_KEY", "")
     monkeypatch.setenv("ARGUS_LANGFUSE_SECRET_KEY", "")
 

@@ -8,8 +8,11 @@ from pydantic import BaseModel, ConfigDict, computed_field
 class RepositoryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
+    provider: str = "gitlab"
     project_path: str
-    gitlab_project_id: int
+    gitlab_project_id: int | None
+    provider_project_id: str | None = None
+    default_llm_endpoint_id: uuid.UUID | None = None
     enabled: bool
     poll_interval_s: int
     stale_mr_after_days: int
@@ -145,6 +148,7 @@ class DistillationRunOut(BaseModel):
 
 
 class MergeRequestDetail(BaseModel):
+    provider: str = "gitlab"
     mr: MergeRequestOut
     notes: list[NoteOut]
     threads: list[ThreadOut] = []
@@ -154,6 +158,7 @@ class MergeRequestDetail(BaseModel):
 
 class RepositoryCreate(BaseModel):
     project_path: str
+    provider: Literal["gitlab", "github"] = "gitlab"
 
 
 class ReviewerProxyCreate(BaseModel):
@@ -196,6 +201,7 @@ class ReviewerProfileOut(BaseModel):
 
 
 class RepositoryUpdate(BaseModel):
+    default_llm_endpoint_id: uuid.UUID | None = None
     enabled: bool | None = None
     poll_interval_s: int | None = None
     stale_mr_after_days: int | None = None

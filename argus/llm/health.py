@@ -27,6 +27,8 @@ async def resolve_served_model(cfg: LLMConfig) -> str | None:
     is only what we asked for; llama.cpp's /models returns the loaded GGUF
     path, whose filename carries the model and its quantization. Best-effort:
     telemetry must never fail a review."""
+    if cfg.provider == "vertex_ai":
+        return cfg.model
     if not cfg.api_base:
         return None  # hosted provider serves exactly what we named
     headers = {"Authorization": f"Bearer {cfg.api_key}"} if cfg.api_key else {}
@@ -55,7 +57,7 @@ async def resolve_served_model(cfg: LLMConfig) -> str | None:
 async def check_llm_health(cfg: LLMConfig) -> bool:
     """True if cfg has no custom api_base (nothing to check) or the llama.cpp
     server responds to a GET {server_root}/health within PING_TIMEOUT_S."""
-    if not cfg.api_base:
+    if cfg.provider == "vertex_ai" or not cfg.api_base:
         return True
     headers = {"Authorization": f"Bearer {cfg.api_key}"} if cfg.api_key else {}
     try:

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Plus } from "lucide-react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { api } from "../../api/client";
 import {
   useCreateRepository,
   useProfiles,
@@ -23,6 +25,15 @@ export default function Repos() {
   const navigate = useNavigate();
   const createRepository = useCreateRepository();
   const updateRepository = useUpdateRepository();
+  const qc = useQueryClient();
+  const [prUrl, setPrUrl] = useState("");
+  const githubImport = useMutation({
+    mutationFn: api.importGithubPR,
+    onSuccess: (result) => {
+      void qc.invalidateQueries();
+      navigate(`/mrs/${result.mr_id}`);
+    },
+  });
 
   const profileName = (id: string | null) => {
     if (id === null) return "default (built-in)";
@@ -50,6 +61,33 @@ export default function Repos() {
       </div>
 
       {repos.error && <ErrorBox message={repos.error.message} onRetry={repos.refetch} />}
+      <form
+        className="ui-card section"
+        onSubmit={(event) => {
+          event.preventDefault();
+          githubImport.mutate(prUrl.trim());
+        }}
+      >
+        <label htmlFor="github-pr-url">Import or refresh a public GitHub pull request</label>
+        <div className="row" style={{ gap: 8, marginTop: 8 }}>
+          <input
+            id="github-pr-url"
+            type="url"
+            required
+            placeholder="https://github.com/owner/repo/pull/123"
+            value={prUrl}
+            onChange={(event) => setPrUrl(event.target.value)}
+            style={{ flex: 1 }}
+          />
+          <button className="btn-p" disabled={githubImport.isPending || !prUrl.trim()}>
+            {githubImport.isPending ? "Importing…" : "Import PR"}
+          </button>
+        </div>
+        <p className="muted">
+          Only selected PRs are tracked. Gemini reviews create a preview before you publish.
+        </p>
+        {githubImport.error && <ErrorBox message={githubImport.error.message} />}
+      </form>
       {updateRepository.error && <ErrorBox message={updateRepository.error.message} />}
       {repos.isPending && <div className="spinner">Loading repositories…</div>}
 
@@ -73,13 +111,18 @@ export default function Repos() {
                 onClick={() => navigate(`/repos/${repo.id}`)}
               >
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div className="mono" style={{ fontWeight: 600 }}>{repo.project_path}</div>
+                  <div className="mono" style={{ fontWeight: 600 }}>
+                    {repo.project_path}
+                  </div>
                   <div className="muted" style={{ marginTop: 5 }}>
                     {repo.mr_count} MRs tracked · every {repo.poll_interval_s}s · default agent{" "}
                     <b className="mono">{profileName(repo.default_profile_id)}</b>
                   </div>
                 </div>
-                <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ display: "flex", alignItems: "center", gap: 8 }}
+                >
                   {repo.enabled ? (
                     <StatusBadge status="done" label="Enabled" />
                   ) : (

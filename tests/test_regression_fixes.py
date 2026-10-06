@@ -381,7 +381,7 @@ async def test_scheduler_fetches_current_code_for_recently_audited_learnings(eng
     root = tmp_path / "workspaces"
     actual_manager = workspace.WorkspaceManager
     acquired = []
-    def local_manager(path, url):
+    def local_manager(path, url, **kwargs):
         assert path == root / str(repo.id)
         acquired.append(path)
         return actual_manager(path, str(source))
@@ -427,7 +427,7 @@ async def test_resumed_audit_keeps_its_original_commit_when_the_branch_moves(eng
         await s.commit()
 
     actual_manager = workspace.WorkspaceManager
-    def local_manager(path, url):
+    def local_manager(path, url, **kwargs):
         return actual_manager(tmp_path / "checkout", str(source))
     monkeypatch.setattr(workspace, "WorkspaceManager", local_manager)
     async def cfg(*args):

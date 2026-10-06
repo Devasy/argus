@@ -7,7 +7,7 @@ from argus.settings_store import (EDITABLE_KEYS, SECRET_KEYS,
 
 
 def test_secrets_are_not_editable():
-    assert set(SECRET_KEYS) == {"gitlab_token", "api_token", "distiller_api_key",
+    assert set(SECRET_KEYS) == {"gitlab_token", "github_token", "api_token", "distiller_api_key",
                                 "langfuse_public_key", "langfuse_secret_key"}
     assert not set(SECRET_KEYS) & set(EDITABLE_KEYS)
     # database_url and workspace_root are infra, not runtime-tunable

@@ -20,7 +20,7 @@ async def last_reviewed_version(session: AsyncSession, mr_id) -> MRVersion | Non
     return await session.get(MRVersion, review.mr_version_id)
 
 
-async def changed_paths_since(client, project_id: int, mr_iid: int,
+async def changed_paths_since(client, project_id: int | str, mr_iid: int,
                               old_head_sha: str, new_head_sha: str) -> set[str] | None:
     try:
         cmp = await client.compare(project_id, old_head_sha, new_head_sha)

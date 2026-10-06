@@ -10,7 +10,7 @@ from argus.config import Settings
 from argus.domain.models import RuntimeSetting
 
 SECRET_KEYS: tuple[str, ...] = (
-    "gitlab_token", "api_token", "distiller_api_key",
+    "gitlab_token", "github_token", "api_token", "distiller_api_key",
     "langfuse_public_key", "langfuse_secret_key",
 )
 

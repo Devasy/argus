@@ -1,0 +1,9 @@
+# Optional override: start/stop this local pilot explicitly.
+# docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.oss.yml up -d --build
+services:
+  db:
+    restart: "no"
+  backend:
+    restart: "no"
+  frontend:
+    restart: "no"

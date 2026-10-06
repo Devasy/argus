@@ -25,9 +25,8 @@ def test_scout_static_mentions_graphify_and_skill_tools():
     assert "read_module_skill" in SCOUT_STATIC
 
 
-def test_max_output_tokens_for_caps_only_the_groq_provider():
-    """Groq rejects max_tokens > 16384 on this model; every other provider
-    must keep getting an unbounded (None) cap, i.e. today's behaviour."""
+def test_max_output_tokens_for_caps_groq_and_vertex():
+    """Groq and Vertex reviews use a 16384 output cap without shrinking input."""
     from types import SimpleNamespace
 
     from argus.llm.config import LLMConfig
@@ -40,6 +39,9 @@ def test_max_output_tokens_for_caps_only_the_groq_provider():
         provider="ollama", model="openai/qwen3.8-27b", api_base="http://x/v1"))
 
     assert _max_output_tokens_for(groq_deps) == GROQ_MAX_OUTPUT_TOKENS
+    vertex_deps = SimpleNamespace(llm_cfg=LLMConfig(
+        provider="vertex_ai", model="vertex_ai/gemini-3.8-flash"))
+    assert _max_output_tokens_for(vertex_deps) == 16384
     assert _max_output_tokens_for(ollama_deps) is None
 
 

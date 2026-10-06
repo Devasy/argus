@@ -1,4 +1,5 @@
 from typing import Any
+import os
 
 from langchain_litellm import ChatLiteLLM
 from langchain_core.messages import BaseMessage
@@ -91,6 +92,47 @@ class _GroqChatLiteLLM(_FallbackChatLiteLLM):
         return message_dicts, params
 
 
+class _QuotaChatLiteLLM(_FallbackChatLiteLLM):
+    """Apply durable request budgets to free cloud endpoints."""
+    quota_database_url: str | None = Field(default=None, exclude=True)
+    quota_reference: str = "GEMINI_API_KEY"
+    quota_limits: tuple[int, int, int] = (5, 16000, 100)
+
+    async def _agenerate(self, messages, **kwargs):
+        from litellm import RateLimitError, token_counter
+        from argus.llm.quota import reserve, pause
+        if self.quota_database_url:
+            wire, _ = self._create_message_dicts(messages, None)
+            await reserve(self.quota_database_url, self.quota_reference, self.model,
+                          token_counter(model=self.model, messages=wire, tools=kwargs.get("tools")), self.quota_limits)
+        try:
+            return await super()._agenerate(messages, **kwargs)
+        except RateLimitError as error:
+            if not self.quota_database_url:
+                raise
+            import re
+            delay = re.search(r"retry(?:Delay|_delay| after)?[^0-9]*(\d+)", str(error), re.I)
+            raise await pause(self.quota_database_url, self.quota_reference, self.model,
+                              int(delay[1]) if delay else 60) from None
+
+
+class _GeminiChatLiteLLM(_QuotaChatLiteLLM):
+    """Retain Gemini thought signatures in tool histories."""
+    def _create_message_dicts(self, messages, stop):
+        dictionaries, params = super()._create_message_dicts(messages, stop)
+        for message, wire in zip(messages, dictionaries):
+            fields = message.additional_kwargs.get("provider_specific_fields")
+            if fields:
+                wire["provider_specific_fields"] = fields
+            original = message.additional_kwargs.get("tool_calls") or []
+            by_id = {tc.get("id"): tc for tc in original}
+            for tc in wire.get("tool_calls") or []:
+                raw = by_id.get(tc.get("id"), {})
+                if raw.get("provider_specific_fields"):
+                    tc["provider_specific_fields"] = raw["provider_specific_fields"]
+        return dictionaries, params
+
+
 def build_chat_model(cfg: LLMConfig, callbacks: list | None = None) -> ChatLiteLLM:
     """Per-instance construction — NEVER mutate litellm module globals."""
     kwargs: dict = dict(model=cfg.model, temperature=cfg.temperature,
@@ -110,8 +152,16 @@ def build_chat_model(cfg: LLMConfig, callbacks: list | None = None) -> ChatLiteL
         kwargs["request_timeout"] = cfg.timeout
     if cfg.api_base:
         kwargs["api_base"] = cfg.api_base
-    if cfg.api_key:
-        kwargs["api_key"] = cfg.api_key
+    if cfg.provider == "vertex_ai":
+        from argus.llm.vertex import transport_kwargs
+        kwargs.update(transport_kwargs(cfg))
+    api_key = os.environ.get(cfg.api_key_ref) if cfg.api_key_ref else cfg.api_key
+    if cfg.provider == "claude_cli_proxy" and not api_key:
+        api_key = "claude-cli-proxy"
+    if cfg.api_key_ref and not api_key:
+        raise ValueError(f"missing model credential environment variable: {cfg.api_key_ref}")
+    if api_key:
+        kwargs["api_key"] = api_key
     if getattr(cfg, "langfuse_handler", None):
         kwargs["callbacks"].append(cfg.langfuse_handler)
 
@@ -131,6 +181,8 @@ def build_chat_model(cfg: LLMConfig, callbacks: list | None = None) -> ChatLiteL
     if model_kwargs:
         kwargs["model_kwargs"] = model_kwargs
     if cfg.fallback:
+        if cfg.free_only:
+            raise ValueError("free-only endpoints do not permit fallback")
         fallback = cfg.fallback
         provider = fallback.get("provider") or fallback["model"].split("/", 1)[0]
         # Legacy local endpoints use the OpenAI wire protocol.
@@ -139,7 +191,19 @@ def build_chat_model(cfg: LLMConfig, callbacks: list | None = None) -> ChatLiteL
         fallback_cfg = cfg.model_copy(update={
             "provider": provider, "model": fallback["model"],
             "api_base": fallback.get("api_base"), "api_key": fallback.get("api_key"),
+            "api_key_ref": fallback.get("api_key_ref"),
             "fallback": None, "langfuse_handler": None})
         kwargs["fallback_model"] = build_chat_model(fallback_cfg, callbacks=kwargs["callbacks"])
-    model_cls = _GroqChatLiteLLM if cfg.provider == "groq" else _FallbackChatLiteLLM
+    model_cls = {"groq": _GroqChatLiteLLM, "gemini": _GeminiChatLiteLLM, "vertex_ai": _GeminiChatLiteLLM}.get(cfg.provider, _FallbackChatLiteLLM)
+    if cfg.free_only:
+        from argus.providers.settings import require_pilot_endpoint
+        require_pilot_endpoint(cfg)
+        kwargs["max_retries"] = 0
+        if cfg.provider != "gemini":
+            model_cls = _QuotaChatLiteLLM
+        kwargs.update(quota_database_url=cfg.quota_database_url,
+                      quota_reference=cfg.api_key_ref or "GEMINI_API_KEY", quota_limits=cfg.quota_limits)
+    if cfg.provider == "vertex_ai":
+        kwargs.update(quota_database_url=cfg.quota_database_url,
+                      quota_reference=cfg.api_key_ref or "VERTEX_API_KEY", quota_limits=cfg.quota_limits)
     return model_cls(**kwargs)

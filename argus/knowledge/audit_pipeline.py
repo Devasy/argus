@@ -76,7 +76,7 @@ def _read_tools(deps: AuditDeps, stage_name: str) -> list:
                                         build_report_problem_tool)
     tools = build_read_tools(ToolContext(workspace=deps.workspace, files_by_id={}, hunks={}))
     tools += [build_file_knowledge_tool(deps.sf, deps.settings, deps.repo_id, deps.workspace),
-              build_learning_tool(deps.sf),
+              build_learning_tool(deps.sf, deps.repo_id if deps.settings.repository_knowledge_only else None),
               build_report_problem_tool(deps.sf, None, stage_name, audit_run_id=deps.run_id)]
     if deps.graph_path is not None:
         tools += build_graphify_tool(deps.graph_path, set())
@@ -104,6 +104,9 @@ async def _run_agent(deps: AuditDeps, stage_name: str, system_prompt: str, user_
     except asyncio.CancelledError:
         raise
     except Exception as e:
+        from argus.llm.quota import QuotaDeferred
+        if isinstance(e, QuotaDeferred):
+            raise
         # Any model-call failure -- not just the unrecoverable-stage kind --
         # must not take the whole run down with it: a transient provider
         # error (timeout, connection drop) on one ground group used to fail

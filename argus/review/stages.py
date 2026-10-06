@@ -724,6 +724,9 @@ class _ToolErrorGuard(AgentMiddleware):
         try:
             return await handler(request)
         except Exception as e:
+            from argus.llm.quota import QuotaDeferred
+            if isinstance(e, QuotaDeferred):
+                raise
             logger.warning("tool %s raised %s: %s",
                            request.tool_call["name"], type(e).__name__, e,
                            exc_info=True)

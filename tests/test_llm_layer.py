@@ -104,7 +104,7 @@ async def test_endpoint_with_fallback_populates_fallback_dict(db, monkeypatch):
     cfg = await resolve_llm_config(db, None, None)
     assert cfg.fallback == {"provider": "ollama", "model": "openai/qwen3.8-27b",
                             "api_base": "http://127.0.0.1:8090/v1",
-                            "api_key": None}
+                            "api_key": None, "api_key_ref": None}
 
 
 async def test_endpoint_without_fallback_leaves_fallback_none(db):

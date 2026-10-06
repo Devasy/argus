@@ -37,6 +37,8 @@ async def test_run_thread_distillation_returns_validated_decisions(
     monkeypatch.setattr(stages, "run_stage_agent", fake_stage_agent)
 
     class FakeGitLab:
+        clone_url = staticmethod(lambda path: "https://example.invalid/repo.git")
+        review_ref = staticmethod(lambda number: f"refs/merge-requests/{number}/head")
         async def list_diffs(self, project, iid):
             return []
 
@@ -66,6 +68,8 @@ async def test_run_thread_distillation_degrades_when_clone_fails(
     monkeypatch.setattr(stages, "run_stage_agent", fake_stage_agent)
 
     class FakeGitLab:
+        clone_url = staticmethod(lambda path: "https://example.invalid/repo.git")
+        review_ref = staticmethod(lambda number: f"refs/merge-requests/{number}/head")
         async def list_diffs(self, project, iid):
             return []
 
@@ -312,6 +316,8 @@ async def test_run_thread_distillation_gives_the_agent_propose_not_upsert(db, en
         return ad.DistillationResult(decisions=[])
 
     class _GL:
+        clone_url = staticmethod(lambda path: "https://example.invalid/repo.git")
+        review_ref = staticmethod(lambda number: f"refs/merge-requests/{number}/head")
         async def list_diffs(self, *a):
             return []
     monkeypatch.setattr(ad.stages, "run_stage_agent", fake_run)

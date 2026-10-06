@@ -173,3 +173,81 @@ def test_plain_chat_model_keeps_reasoning_content_for_local_provider():
         _prior_ai_turn_with_reasoning(), stop=None)
     assert message_dicts[0]["reasoning_content"] == \
         "step by step reasoning that Groq rejects"
+
+
+@pytest.mark.parametrize("override", [
+    {"model": "openai/cohere/north-mini-code"},
+    {"api_base": "https://example.com/v1"},
+    {"fallback": {"model": "openai/paid"}},
+])
+def test_free_openrouter_rejects_paid_routes(override):
+    config = _cfg(provider="openai", model="openai/cohere/north-mini-code:free",
+                  api_base="https://openrouter.ai/api/v1", free_only=True)
+    config = config.model_copy(update=override)
+    with pytest.raises(ValueError):
+        build_chat_model(config)
+
+
+def test_free_openrouter_uses_durable_governor():
+    from argus.llm.factory import _QuotaChatLiteLLM
+    config = _cfg(provider="openai", model="openai/cohere/north-mini-code:free",
+                  api_base="https://openrouter.ai/api/v1", free_only=True,
+                  quota_database_url="postgresql+asyncpg://test", quota_limits=(5, 16000, 50))
+    model = build_chat_model(config)
+    assert isinstance(model, _QuotaChatLiteLLM)
+    assert model.quota_database_url == config.quota_database_url
+    assert model.quota_limits == (5, 16000, 50)
+    assert model.max_retries == 0
+    assert "quota_database_url" not in model.model_dump()
+
+
+async def test_free_openrouter_reserves_before_request(monkeypatch):
+    from argus.llm.factory import _FallbackChatLiteLLM
+    from argus.llm import quota
+    from langchain_core.messages import HumanMessage
+    events = []
+
+    async def reserve(*args):
+        events.append(("reserve", args[1], args[4]))
+
+    async def generate(self, messages, **kwargs):
+        events.append(("request",))
+        return "ok"
+
+    monkeypatch.setattr(quota, "reserve", reserve)
+    monkeypatch.setattr(_FallbackChatLiteLLM, "_agenerate", generate)
+    model = build_chat_model(_cfg(provider="openai", model="openai/cohere/north-mini-code:free",
+        api_base="https://openrouter.ai/api/v1", free_only=True,
+        quota_database_url="postgresql+asyncpg://test", quota_limits=(5, 16000, 50)))
+    assert await model._agenerate([HumanMessage(content="hello")]) == "ok"
+    assert [event[0] for event in events] == ["reserve", "request"]
+    assert events[0][2] == (5, 16000, 50)
+
+
+def test_free_openrouter_budget_is_independent_of_gemini():
+    from argus.config import Settings
+    from argus.providers.settings import configure_quota
+    cfg = _cfg(provider="openai", free_only=True)
+    configure_quota(cfg, Settings(gemini_free_tpm=1000, openrouter_free_tpm=131072,
+                                  openrouter_free_rpd=500))
+    assert cfg.quota_limits == (5, 131072, 50)
+
+
+async def test_github_openrouter_uses_provider_context_budget():
+    from types import SimpleNamespace
+    from argus.config import Settings
+    from argus.domain.models import Repository
+    from argus.providers.settings import settings_for_repository
+    repo = SimpleNamespace(provider="github", embedding_config={}, default_llm_endpoint_id="endpoint")
+    endpoint = SimpleNamespace(base_url="https://openrouter.ai/api/v1")
+
+    class Session:
+        async def get(self, model, identifier):
+            return repo if model is Repository else endpoint
+
+    settings = Settings(model_context_window=130000, gemini_free_tpm=16000,
+                        openrouter_free_tpm=131072)
+    scoped = await settings_for_repository(Session(), settings, "repo")
+    assert scoped.model_context_window == 130000
+    assert settings.model_context_window == 130000
+    assert scoped.repository_knowledge_only is True

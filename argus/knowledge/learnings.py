@@ -9,7 +9,8 @@ from sqlalchemy.orm import defer
 
 from argus.config import Settings
 from argus.domain.models import Actor, InjectionEvent, Learning, MergeRequest
-from argus.knowledge.embeddings import EmbeddingError, embed_text
+from argus.knowledge.embeddings import EmbeddingError, embed_text, embedding_fingerprint
+from argus.providers.settings import settings_for_repository
 from argus.knowledge.lexical import RRF_K, Bm25Index, rrf
 from argus.knowledge.reputation import (combined_strength, reputation,
                                             reputation_sql_expr)
@@ -44,6 +45,7 @@ async def upsert_learning(session: AsyncSession, settings: Settings, *,
     file_pattern/file_paths/metadata in place, re-embed, return it — the
     dedup-search path is skipped entirely. When learning_id is None (default):
     unchanged existing behavior (dedup-search-or-insert)."""
+    settings = await settings_for_repository(session, settings, repo_id)
     vec = await embed_text(f"{topic} :: {hint_text}", settings, is_query=False)
     if learning_id is not None:
         learning = await session.get(Learning, learning_id)
@@ -56,6 +58,7 @@ async def upsert_learning(session: AsyncSession, settings: Settings, *,
         learning.file_paths = file_paths
         learning.metadata_ = metadata
         learning.embedding = vec
+        learning.embedding_fingerprint = embedding_fingerprint(settings)
         # a rewrite keeps where the learning came from unless the caller supplies new provenance
         if mr_id is not None:
             learning.mr_id = mr_id
@@ -70,14 +73,16 @@ async def upsert_learning(session: AsyncSession, settings: Settings, *,
         nearest = (await session.execute(
             select(Learning, Learning.embedding.cosine_distance(vec).label("d"))
             .where(scope, Learning.status == "active", Learning.kind == kind,
-                   Learning.embedding.isnot(None))
+                   Learning.embedding.isnot(None),
+                   (Learning.embedding_fingerprint == embedding_fingerprint(settings))
+                   if settings.repository_knowledge_only else True)
             .order_by("d").limit(1))).first()
         if nearest and nearest[1] is not None and nearest[1] < dedup_threshold:
             logger.info("learning deduped onto %s (d=%.3f)", nearest[0].id, nearest[1])
             return nearest[0]
     learning = Learning(repo_id=repo_id, topic=topic, hint_text=hint_text,
                         kind=kind, file_pattern=file_pattern, file_paths=file_paths,
-                        metadata_=metadata, embedding=vec,
+                        metadata_=metadata, embedding=vec, embedding_fingerprint=embedding_fingerprint(settings),
                         source_review_id=source_review_id,
                         mr_id=mr_id, source_note_id=source_note_id,
                         learned_from_actor_id=learned_from_actor_id)
@@ -168,6 +173,7 @@ async def relevant_learnings(session: AsyncSession, settings: Settings, *,
     whole active corpus and its ranking is fused with the vector arm's by RRF.
     The two candidate sets are UNIONED, never reranked -- a lexical winner
     outside the vector top-`pool` is exactly what this is for."""
+    settings = await settings_for_repository(session, settings, repo_id)
     try:
         qvec = await embed_text(query_text, settings, is_query=True)
     except EmbeddingError:
@@ -187,11 +193,14 @@ async def relevant_learnings(session: AsyncSession, settings: Settings, *,
     # cosine_distance -- a learning saved while the embedding backend was
     # down (upsert_learning tolerates vec=None) still has real text, and the
     # lexical arm is exactly the arm that does not need a vector to use it.
-    base_filters = [or_(Learning.repo_id == repo_id, Learning.repo_id.is_(None)),
+    base_filters = [(Learning.repo_id == repo_id if settings.repository_knowledge_only
+                     else or_(Learning.repo_id == repo_id, Learning.repo_id.is_(None))),
                     Learning.status == "active"]
     if exclude_kinds:
         base_filters.append(Learning.kind.notin_(exclude_kinds))
     vector_filters = base_filters + [Learning.embedding.isnot(None)]
+    if settings.repository_knowledge_only:
+        vector_filters.append(Learning.embedding_fingerprint == embedding_fingerprint(settings))
 
     if not lexical_query:
         rows = (await session.execute(
@@ -209,8 +218,12 @@ async def relevant_learnings(session: AsyncSession, settings: Settings, *,
             .options(defer(Learning.embedding)))).all()
         by_id = {l.id: l for l, _ in vec_rows}
         vector_ids = [l.id for l, _ in vec_rows[:pool]]
+        missing = Learning.embedding.is_(None)
+        if settings.repository_knowledge_only:
+            missing = or_(missing, Learning.embedding_fingerprint != embedding_fingerprint(settings),
+                          Learning.embedding_fingerprint.is_(None))
         unembedded = list((await session.execute(
-            select(Learning).where(*base_filters, Learning.embedding.is_(None))
+            select(Learning).where(*base_filters, missing)
             .limit(max(0, LEXICAL_CORPUS_LIMIT - len(vec_rows)))
             .options(defer(Learning.embedding)))).scalars().all())
         for l in unembedded:
@@ -260,10 +273,11 @@ async def relevant_learnings(session: AsyncSession, settings: Settings, *,
 
 
 async def do_not_suggest(session: AsyncSession, *, repo_id,
-                         limit: int = 20) -> list[Learning]:
+                         limit: int = 20, repository_only: bool = False) -> list[Learning]:
     return list((await session.execute(
         select(Learning)
-        .where(or_(Learning.repo_id == repo_id, Learning.repo_id.is_(None)),
+        .where((Learning.repo_id == repo_id if repository_only else
+                or_(Learning.repo_id == repo_id, Learning.repo_id.is_(None))),
                Learning.status == "active", Learning.kind == "do_not_suggest")
         .order_by(Learning.repo_id.is_(None), Learning.created_at.desc())
         .limit(limit))).scalars().all())
@@ -443,6 +457,7 @@ async def search_learnings(session: AsyncSession, settings: Settings, *,
     callers that never pass it); pass status=None explicitly to search across
     every status, same meaning as in list_learnings. The other filters mean
     the same thing as in list_learnings -- see _learning_filters."""
+    settings = await settings_for_repository(session, settings, repo_id)
     qvec = await embed_text(query_text, settings, is_query=True)
     if qvec is None:
         return [], 0
@@ -455,6 +470,9 @@ async def search_learnings(session: AsyncSession, settings: Settings, *,
         no_verdicts=no_verdicts, strength_min=strength_min, strength_max=strength_max,
         created_after=created_after, created_before=created_before,
         mr_iid=mr_iid, learned_from_username=learned_from_username)
+    if settings.repository_knowledge_only:
+        filters += [Learning.repo_id == repo_id,
+                    Learning.embedding_fingerprint == embedding_fingerprint(settings)]
     dist = Learning.embedding.cosine_distance(qvec).label("d")
     base = (select(Learning, MergeRequest, Actor, dist)
            .outerjoin(MergeRequest, Learning.mr_id == MergeRequest.id)
