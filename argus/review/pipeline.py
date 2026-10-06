@@ -238,7 +238,7 @@ GROQ_MAX_OUTPUT_TOKENS = 16384
 
 
 def _max_output_tokens_for(deps: "PipelineDeps") -> int | None:
-    return GROQ_MAX_OUTPUT_TOKENS if deps.llm_cfg.provider == "groq" else None
+    return GROQ_MAX_OUTPUT_TOKENS if deps.llm_cfg.provider in {"groq", "vertex_ai"} else None
 
 
 def _metadata(deps: PipelineDeps, stage_name: str) -> dict:
