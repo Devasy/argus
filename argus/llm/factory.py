@@ -152,6 +152,9 @@ def build_chat_model(cfg: LLMConfig, callbacks: list | None = None) -> ChatLiteL
         kwargs["request_timeout"] = cfg.timeout
     if cfg.api_base:
         kwargs["api_base"] = cfg.api_base
+    if cfg.provider == "vertex_ai":
+        from argus.llm.vertex import transport_kwargs
+        kwargs.update(transport_kwargs(cfg))
     api_key = os.environ.get(cfg.api_key_ref) if cfg.api_key_ref else cfg.api_key
     if cfg.provider == "claude_cli_proxy" and not api_key:
         api_key = "claude-cli-proxy"
@@ -191,13 +194,16 @@ def build_chat_model(cfg: LLMConfig, callbacks: list | None = None) -> ChatLiteL
             "api_key_ref": fallback.get("api_key_ref"),
             "fallback": None, "langfuse_handler": None})
         kwargs["fallback_model"] = build_chat_model(fallback_cfg, callbacks=kwargs["callbacks"])
-    model_cls = {"groq": _GroqChatLiteLLM, "gemini": _GeminiChatLiteLLM}.get(cfg.provider, _FallbackChatLiteLLM)
+    model_cls = {"groq": _GroqChatLiteLLM, "gemini": _GeminiChatLiteLLM, "vertex_ai": _GeminiChatLiteLLM}.get(cfg.provider, _FallbackChatLiteLLM)
     if cfg.free_only:
-        from argus.providers.settings import require_free_pilot
-        require_free_pilot(cfg)
+        from argus.providers.settings import require_pilot_endpoint
+        require_pilot_endpoint(cfg)
         kwargs["max_retries"] = 0
         if cfg.provider != "gemini":
             model_cls = _QuotaChatLiteLLM
         kwargs.update(quota_database_url=cfg.quota_database_url,
                       quota_reference=cfg.api_key_ref or "GEMINI_API_KEY", quota_limits=cfg.quota_limits)
+    if cfg.provider == "vertex_ai":
+        kwargs.update(quota_database_url=cfg.quota_database_url,
+                      quota_reference=cfg.api_key_ref or "VERTEX_API_KEY", quota_limits=cfg.quota_limits)
     return model_cls(**kwargs)

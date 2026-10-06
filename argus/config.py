@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     gitlab_ca_bundle: str | None = None
     gitlab_ssl_verify: bool = True
     github_token: str = ""
+    github_llm_endpoint_name: str = "github-gemini-free"
+    vertex_rpm: int = 10
+    vertex_tpm: int = 262144
+    vertex_rpd: int = 1000
     github_app_id: str = ""
     github_installation_id: str = ""
     github_app_private_key_path: str = ""

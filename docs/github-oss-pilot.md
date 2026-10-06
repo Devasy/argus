@@ -129,3 +129,37 @@ of its global context setting and the selected provider input budget. Retrieval 
 
 See [OpenRouter free limits](https://openrouter.ai/docs/api_reference/limits)
 and the [North Mini Code model page](https://openrouter.ai/cohere/north-mini-code:free).
+
+
+## Credit-backed Vertex AI (Gemini 3.8 Flash)
+
+Add `VERTEX_API_KEY` to the backend environment (`.env.prod` in Docker).
+A Cloud API key enabled for Vertex is separate from the Gemini Developer API key.
+Create an endpoint named `github-vertex-credits` with:
+
+- Provider: `vertex_ai`
+- Model: `vertex_ai/gemini-3.8-flash`
+- Base URL: `https://aiplatform.googleapis.com/v1/publishers/google`
+- Credential reference: `VERTEX_API_KEY`
+- Global default: disabled; fallback: none.
+
+Set `ARGUS_GITHUB_LLM_ENDPOINT_NAME=github-vertex-credits` and recreate the backend.
+New GitHub imports then use that endpoint. Select it as the default for existing
+GitHub repositories. Existing saved reviews retain their pinned configurations;
+start a new preview to review using the new endpoint. Existing global/GitLab
+endpoints remain separate. Retrieval embeddings continue using `GEMINI_API_KEY`.
+
+Vertex reuses the Gemini REST transport and preserves thought signatures across
+tool calls. Provider-specific routing stays in `argus/llm/vertex.py`. No service
+account file or OAuth token refresh is required for this API-key configuration.
+`ARGUS_VERTEX_RPM`, `ARGUS_VERTEX_TPM`, and `ARGUS_VERTEX_RPD` default to
+10, 262144, and 1000; these local request/input budgets are separate from the free
+Gemini and OpenRouter budgets. Server rate limits defer jobs. Review context stays
+at the configured global limit (130000 by default), and each response is capped at
+16384 tokens. These controls do not impose a dollar spend cap or verify promotional
+credit eligibility/balance. Check the Cloud Billing account linked to the key's
+project for credit consumption.
+
+The endpoint Test action performs a live tool-call round trip. Gemini 3.8 Flash
+supports LOW, MEDIUM (default), and HIGH thinking; MINIMAL is unsupported.
+See [Google's Gemini 3.8 Flash guide](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-8-flash).

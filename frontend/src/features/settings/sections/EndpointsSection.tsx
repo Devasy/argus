@@ -33,8 +33,8 @@ export default function EndpointsSection() {
     <div className="ui-card set-card">
       <h3>Model endpoints</h3>
       <p className="muted">
-        GitHub imports use github-gemini-free without changing your global default. Use an unbilled
-        Google project for free-tier requests.
+        GitHub imports use the configured repository endpoint. Supported options include Gemini,
+        OpenRouter free models, and Vertex AI with Cloud billing credits.
       </p>
       {rows.isPending && <p role="status">Loading endpoints…</p>}
       {rows.error && <ErrorBox message={rows.error.message} />}

@@ -82,14 +82,20 @@ def integrations_router(sf, settings, require_user, require_admin):
                 if repo is None:
                     await s.execute(text("SELECT pg_advisory_xact_lock(hashtext('argus-model-endpoints'))"))
                     ep = (await s.execute(select(LLMEndpoint).where(
-                        LLMEndpoint.name == "github-gemini-free"))).scalar_one_or_none()
+                        LLMEndpoint.name == settings.github_llm_endpoint_name))).scalar_one_or_none()
                     if ep is None:
+                        if settings.github_llm_endpoint_name != "github-gemini-free":
+                            raise HTTPException(422, "configured GitHub endpoint does not exist")
                         ep = LLMEndpoint(name="github-gemini-free", provider="gemini",
                             model="gemini/gemini-3.8-flash", api_key_ref="GEMINI_API_KEY")
                         s.add(ep)
                         await s.flush()
-                    if ep.provider != "gemini" or ep.fallback_endpoint_id is not None:
-                        raise HTTPException(422, "github-gemini-free must be a Gemini endpoint without fallback")
+                    from argus.llm.config import resolve_llm_config
+                    from argus.providers.settings import require_pilot_endpoint
+                    try:
+                        require_pilot_endpoint(await resolve_llm_config(s, ep.id, None))
+                    except ValueError as error:
+                        raise HTTPException(422, str(error)) from None
                     repo = Repository(provider="github", project_path=project["path_with_namespace"],
                         provider_project_id=str(project["id"]), default_branch=project.get("default_branch"),
                         default_llm_endpoint_id=ep.id, learnings_cooldown_hours=0,
@@ -174,9 +180,9 @@ def integrations_router(sf, settings, require_user, require_admin):
                 raise HTTPException(404, "endpoint not found")
             cfg = await resolve_llm_config(s, endpoint_id, None)
         cfg.timeout, cfg.num_retries = 30, 0
-        if cfg.provider == "gemini" or (cfg.api_base or "").rstrip("/") == "https://openrouter.ai/api/v1":
-            from argus.providers.settings import require_free_pilot, configure_quota
-            require_free_pilot(cfg)
+        if cfg.provider in {"gemini", "vertex_ai"} or (cfg.api_base or "").rstrip("/") == "https://openrouter.ai/api/v1":
+            from argus.providers.settings import require_pilot_endpoint, configure_quota
+            require_pilot_endpoint(cfg)
             configure_quota(cfg, settings)
         try:
             from langchain_core.messages import HumanMessage, ToolMessage

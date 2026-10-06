@@ -15,7 +15,7 @@ class LLMConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     provider: Literal["anthropic", "openai", "gemini", "ollama",
-                     "claude_cli_proxy", "groq"]
+                     "claude_cli_proxy", "groq", "vertex_ai"]
     model: str
     api_base: str | None = None
     api_key: str | None = Field(default=None, exclude=True)

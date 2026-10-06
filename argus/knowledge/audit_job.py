@@ -70,11 +70,11 @@ async def run_audit_job(sf, settings, payload: dict, endpoint_name: str | None) 
             ref = run.commit_sha or await resolve_audit_ref(s, repo)
             # same "worker endpoint else default" rule the distill lanes use
             if repo.provider == "github":
-                from argus.providers.settings import settings_for_repository, require_free_pilot, configure_quota
+                from argus.providers.settings import settings_for_repository, require_pilot_endpoint, configure_quota
                 from argus.llm.config import resolve_llm_config
                 settings = await settings_for_repository(s, settings, repo.id)
                 llm_cfg = await resolve_llm_config(s, repo.default_llm_endpoint_id, None)
-                require_free_pilot(llm_cfg)
+                require_pilot_endpoint(llm_cfg)
                 configure_quota(llm_cfg, settings)
             else:
                 llm_cfg = await distill_llm_config(s, endpoint_name)
