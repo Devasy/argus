@@ -40,6 +40,8 @@ export default function ReviewDetail() {
   const [rerunSubmitting, setRerunSubmitting] = useState(false);
   const [rerunError, setRerunError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ReviewTab>("pipeline");
+  const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
   const countsRef = useRef({ tools: -1, rounds: -1 });
 
   const current = live ?? review.data ?? null;
@@ -152,6 +154,21 @@ export default function ReviewDetail() {
     await cancelReview.mutateAsync([reviewId]);
   };
 
+  const doPublish = async () => {
+    if (!reviewId) return;
+    setPublishing(true);
+    setPublishError(null);
+    try {
+      await api.publishPreview(reviewId);
+      setLive(await api.review(reviewId));
+      void qc.invalidateQueries({ queryKey: queryKeys.review(reviewId) });
+    } catch (error) {
+      setPublishError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   const elapsedMs =
     current?.started_at != null
       ? new Date(current.finished_at ?? Date.now()).getTime() -
@@ -164,9 +181,7 @@ export default function ReviewDetail() {
   const selectedTrace =
     selectedNode != null ? filterTraceForNode(selectedNode, trace.data ?? null) : null;
   const selectedCandidates =
-    selectedNode == null
-      ? []
-      : (current?.candidates ?? []).filter((c) => c.node === selectedNode);
+    selectedNode == null ? [] : (current?.candidates ?? []).filter((c) => c.node === selectedNode);
   const selectedMetrics = selectedSpec
     ? [fmtDuration(selectedSpec.durationMs), fmtTokens(selectedSpec.tokens)].filter(Boolean)
     : [];
@@ -225,6 +240,48 @@ export default function ReviewDetail() {
             )}
           </div>
           {rerunError && <ErrorBox message={rerunError} />}
+          {current.status === "done" &&
+            ["preview", "uncertain"].includes(current.publication_status ?? "") && (
+              <div className="ui-card section">
+                <p>
+                  Review the summary and findings before publishing this saved result to GitHub.
+                </p>
+                <details>
+                  <summary>Saved GitHub review</summary>
+                  <ReactMarkdown>
+                    {current.publication_preview?.body ?? current.summary ?? ""}
+                  </ReactMarkdown>
+                  {current.publication_preview?.comments.map((comment, index) => (
+                    <div key={index}>
+                      <h4>
+                        <code>
+                          {comment.path}:{comment.line}
+                        </code>
+                      </h4>
+                      <ReactMarkdown>{comment.body}</ReactMarkdown>
+                    </div>
+                  ))}
+                </details>
+                <button className="btn-p" disabled={publishing} onClick={doPublish}>
+                  {publishing
+                    ? "Publishing…"
+                    : current.publication_status === "uncertain"
+                      ? "Reconcile delivery"
+                      : "Publish saved review to GitHub"}
+                </button>
+                {publishError && <ErrorBox message={publishError} />}
+              </div>
+            )}
+          {current.publication_status === "published" && (
+            <p>
+              Published to GitHub.{" "}
+              {current.publication_result?.url && (
+                <a href={current.publication_result.url} target="_blank" rel="noreferrer">
+                  View review
+                </a>
+              )}
+            </p>
+          )}
           {cancelReview.error && <ErrorBox message={cancelReview.error.message} />}
 
           <div className="tabs section">
@@ -261,9 +318,14 @@ export default function ReviewDetail() {
                     {selectedSpec ? (
                       <>
                         <h3 className="mono">{selectedSpec.label}</h3>
-                        <div className="row" style={{ gap: 8, alignItems: "center", marginTop: 4, marginBottom: 12 }}>
+                        <div
+                          className="row"
+                          style={{ gap: 8, alignItems: "center", marginTop: 4, marginBottom: 12 }}
+                        >
                           <StatusBadge
-                            status={selectedSpec.status === "pending" ? "queued" : selectedSpec.status}
+                            status={
+                              selectedSpec.status === "pending" ? "queued" : selectedSpec.status
+                            }
                             label={selectedSpec.status === "pending" ? "pending" : undefined}
                           />
                           {selectedMetrics.length > 0 && (

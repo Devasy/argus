@@ -3,7 +3,9 @@ export type MRState = "opened" | "merged" | "closed";
 export interface Repository {
   id: string;
   project_path: string;
-  gitlab_project_id: number;
+  gitlab_project_id: number | null;
+  provider?: "gitlab" | "github";
+  default_llm_endpoint_id?: string | null;
   enabled: boolean;
   poll_interval_s: number;
   stale_mr_after_days: number;
@@ -102,6 +104,7 @@ export interface Thread {
 }
 
 export interface MergeRequestDetail {
+  provider?: "github" | "gitlab";
   mr: MergeRequest;
   notes: Note[];
   threads: Thread[];
@@ -191,6 +194,23 @@ export interface Review {
   prompt_tokens: number;
   completion_tokens: number;
   publish: boolean;
+  publication_status?: "none" | "preview" | "uncertain" | "published";
+  publication_preview?: {
+    body: string;
+    comments: { path: string; line: number; body: string }[];
+  } | null;
+  publication_result?: { id: number; url: string | null } | null;
+}
+
+export interface ModelEndpoint {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+  api_key_ref: string | null;
+  base_url: string | null;
+  secret_present: boolean;
+  is_default: boolean;
 }
 
 export interface ReviewListItem {

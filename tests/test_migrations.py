@@ -82,6 +82,51 @@ def test_alembic_upgrade_head_applies_cleanly(migration_db):
         get_settings.cache_clear()
 
 
+def test_provider_identity_migration_preserves_legacy_ids(migration_db, monkeypatch):
+    cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "migrations"))
+    monkeypatch.setenv("ARGUS_DATABASE_URL", migration_db)
+    get_settings.cache_clear()
+
+    async def seed():
+        engine = get_engine(migration_db)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("INSERT INTO argus.repositories "
+                    "(provider, project_path, gitlab_project_id, enabled, poll_interval_s, "
+                    "stale_mr_after_days, learnings_cooldown_hours, auto_review_enabled) "
+                    "VALUES ('gitlab', 'test/provider-migration', 12345, true, 120, 30, 72, false)"))
+                await conn.execute(text("INSERT INTO argus.actors "
+                    "(provider, provider_user_id, username, is_bot) "
+                    "VALUES ('gitlab', 54321, 'existing-reviewer', false)"))
+        finally:
+            await engine.dispose()
+
+    async def verify():
+        engine = get_engine(migration_db)
+        try:
+            async with engine.connect() as conn:
+                repo = (await conn.execute(text("SELECT gitlab_project_id, provider_project_id "
+                    "FROM argus.repositories WHERE project_path = 'test/provider-migration'"))).one()
+                actor = (await conn.execute(text("SELECT provider_user_id, provider_user_key "
+                    "FROM argus.actors WHERE username = 'existing-reviewer'"))).one()
+                assert tuple(repo) == (12345, "12345")
+                assert tuple(actor) == (54321, "54321")
+        finally:
+            await engine.dispose()
+
+    try:
+        command.upgrade(cfg, "6c12af938e42")
+        asyncio.run(seed())
+        command.upgrade(cfg, "head")
+        asyncio.run(verify())
+        command.downgrade(cfg, "6c12af938e42")
+        command.upgrade(cfg, "head")
+        asyncio.run(verify())
+    finally:
+        get_settings.cache_clear()
+
+
 def test_maintenance_state_upgrade_and_downgrade_preserve_ingestion_state(migration_db):
     import uuid
     repo_id = uuid.uuid4()
@@ -140,7 +185,6 @@ def test_maintenance_state_upgrade_and_downgrade_preserve_ingestion_state(migrat
 def test_decision_history_upgrade_preserves_existing_ledger_decisions(migration_db):
     from argus.db import session_factory
     from argus.domain.models import DistillationRun, DistillThread
-    from tests.distill_helpers import _mr_disc
 
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(REPO_ROOT / "migrations"))
@@ -149,10 +193,30 @@ def test_decision_history_upgrade_preserves_existing_ledger_decisions(migration_
     get_settings.cache_clear()
 
     async def seed():
+        # Seed the historical schema without using today's Repository mapper.
+        async def historical_mr_disc(session):
+            from types import SimpleNamespace
+            import uuid
+            repo_id, mr_id, disc_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+            await session.execute(text("INSERT INTO argus.repositories "
+                "(id, provider, project_path, gitlab_project_id, enabled, poll_interval_s) "
+                "VALUES (:id, 'gitlab', :path, :pid, true, 120)"),
+                {"id": repo_id, "path": f"migration/{repo_id}", "pid": repo_id.int % 1000000000})
+            await session.execute(text("INSERT INTO argus.merge_requests "
+                "(id, repo_id, mr_iid, title, state, source_branch, target_branch, head_sha, web_url, "
+                "draft, has_conflicts, blocking_discussions_resolved) "
+                "VALUES (:id, :repo, 1, 'migration', 'opened', 'feature', 'main', 'abc', 'https://example.invalid', "
+                "false, false, true)"),
+                {"id": mr_id, "repo": repo_id})
+            await session.execute(text("INSERT INTO argus.discussions (id, mr_id, provider_discussion_id, "
+                "individual_note, resolvable, resolved) "
+                "VALUES (:id, :mr, :provider, false, false, false)"),
+                {"id": disc_id, "mr": mr_id, "provider": str(disc_id)})
+            return None, SimpleNamespace(id=mr_id), SimpleNamespace(id=disc_id)
         engine = get_engine(migration_db)
         try:
             async with session_factory(engine)() as s:
-                _, mr, disc = await _mr_disc(s)
+                _, mr, disc = await historical_mr_disc(s)
                 run = DistillationRun(mr_id=mr.id, note_ids=[], status="done")
                 s.add(run)
                 await s.flush()
@@ -161,7 +225,7 @@ def test_decision_history_upgrade_preserves_existing_ledger_decisions(migration_
                     thread_type="human_thread", status="done", reply_verdict="accepted",
                     decision_reason="Original decision", learning_ids=[]))
                 for status in ("queued", "failed"):
-                    _, other_mr, other_disc = await _mr_disc(s)
+                    _, other_mr, other_disc = await historical_mr_disc(s)
                     other_run = DistillationRun(mr_id=other_mr.id, note_ids=[], status="done")
                     s.add(other_run)
                     await s.flush()

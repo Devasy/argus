@@ -33,7 +33,10 @@ class Repository(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     provider: Mapped[str] = mapped_column(Text, default="gitlab")
     project_path: Mapped[str] = mapped_column(Text)
-    gitlab_project_id: Mapped[int] = mapped_column(BigInteger)
+    gitlab_project_id: Mapped[int | None] = mapped_column(BigInteger)
+    provider_project_id: Mapped[str | None] = mapped_column(Text)
+    default_llm_endpoint_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("llm_endpoints.id"))
+    embedding_config: Mapped[dict | None] = mapped_column(JSONB)
     default_branch: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     poll_interval_s: Mapped[int] = mapped_column(Integer, default=120)
@@ -57,10 +60,12 @@ class RepositoryMaintenanceState(Base):
 
 class Actor(Base):
     __tablename__ = "actors"
-    __table_args__ = (UniqueConstraint("provider", "provider_user_id"),)
+    __table_args__ = (UniqueConstraint("provider", "provider_user_id"),
+                      UniqueConstraint("provider", "provider_user_key"))
     id: Mapped[uuid.UUID] = _uuid_pk()
     provider: Mapped[str] = mapped_column(Text, default="gitlab")
-    provider_user_id: Mapped[int] = mapped_column(BigInteger)
+    provider_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    provider_user_key: Mapped[str | None] = mapped_column(Text)
     username: Mapped[str] = mapped_column(Text)
     display_name: Mapped[str | None] = mapped_column(Text)
     avatar_url: Mapped[str | None] = mapped_column(Text)
@@ -101,10 +106,12 @@ class MergeRequest(Base):
 
 class MRVersion(Base):
     __tablename__ = "mr_versions"
-    __table_args__ = (UniqueConstraint("mr_id", "provider_version_id"),)
+    __table_args__ = (UniqueConstraint("mr_id", "provider_version_id"),
+                      UniqueConstraint("mr_id", "snapshot_key"))
     id: Mapped[uuid.UUID] = _uuid_pk()
     mr_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("merge_requests.id"))
-    provider_version_id: Mapped[int] = mapped_column(BigInteger)
+    provider_version_id: Mapped[int | None] = mapped_column(BigInteger)
+    snapshot_key: Mapped[str | None] = mapped_column(Text)
     head_commit_sha: Mapped[str | None] = mapped_column(Text)
     base_commit_sha: Mapped[str | None] = mapped_column(Text)
     start_commit_sha: Mapped[str | None] = mapped_column(Text)
@@ -142,7 +149,7 @@ class Discussion(Base):
 class Note(Base):
     __tablename__ = "notes"
     __table_args__ = (
-        UniqueConstraint("mr_id", "provider_note_id"),
+        UniqueConstraint("mr_id", "provider_note_id", "provider_note_kind"),
         CheckConstraint("author_type IN ('bot','human','system','external_bot')",
                         name="note_author_type_check"),
         CheckConstraint("kind IN ('inline','summary','system')",
@@ -159,6 +166,7 @@ class Note(Base):
     discussion_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("discussions.id"))
     parent_note_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("notes.id"))
     provider_note_id: Mapped[int] = mapped_column(BigInteger)
+    provider_note_kind: Mapped[str] = mapped_column(Text, default="note", server_default="note")
     author_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("actors.id"))
     author_type: Mapped[str] = mapped_column(Text)
     kind: Mapped[str] = mapped_column(Text)
@@ -342,6 +350,9 @@ class Review(Base):
     publish: Mapped[bool] = mapped_column(Boolean, default=True,
                                           server_default=text("true"))
     llm_config: Mapped[dict | None] = mapped_column(JSONB)
+    publication_artifact: Mapped[dict | None] = mapped_column(JSONB)
+    publication_status: Mapped[str] = mapped_column(Text, default="none", server_default="none")
+    publication_result: Mapped[dict | None] = mapped_column(JSONB)
     # What the endpoint reported serving. NULL means unknown, NOT llm_config's
     # model: reviews before this column, and hosted providers, cannot be
     # attributed, so exclude NULLs from per-model comparisons rather than
@@ -614,6 +625,7 @@ class Learning(Base):
     file_pattern: Mapped[str | None] = mapped_column(Text)
     kind: Mapped[str] = mapped_column(Text, default="guidance")  # guidance | do_not_suggest
     embedding: Mapped[list | None] = mapped_column(Vector(EMBEDDING_DIM))
+    embedding_fingerprint: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, default="active")
     hit_count: Mapped[int] = mapped_column(Integer, default=0)
     miss_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -734,6 +746,7 @@ class FileKnowledge(Base):
     key_symbols: Mapped[list | None] = mapped_column(JSONB)
     notes: Mapped[list | None] = mapped_column(JSONB)  # appendable observations
     embedding: Mapped[list | None] = mapped_column(Vector(EMBEDDING_DIM))
+    embedding_fingerprint: Mapped[str | None] = mapped_column(Text)
     updated_by_review_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("reviews.id"))
     updated_at: Mapped[datetime] = _now()
 

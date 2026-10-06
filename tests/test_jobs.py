@@ -160,8 +160,13 @@ async def test_review_claims_ahead_of_older_distill_mr_jobs(db):
 
 
 async def test_same_priority_still_claims_oldest_first(db):
-    await enqueue(db, "review", {"review_id": "first"}, dedup_key="review:first")
-    await enqueue(db, "review", {"review_id": "second"}, dedup_key="review:second")
+    from datetime import timedelta
+    first = await enqueue(db, "review", {"review_id": "first"}, dedup_key="review:first")
+    second = await enqueue(db, "review", {"review_id": "second"}, dedup_key="review:second")
+    # PostgreSQL now() is the transaction start time: both enqueues otherwise
+    # have identical ages, leaving the random UUID tie-breaker to choose either.
+    first.created_at = second.created_at - timedelta(seconds=1)
+    await db.flush()
 
     job = await claim_next(db, "w1", ["review"])
     assert job.payload == {"review_id": "first"}

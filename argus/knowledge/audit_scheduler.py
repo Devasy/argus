@@ -11,7 +11,6 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 logger = logging.getLogger("argus.audit_scheduler")
 
@@ -80,12 +79,11 @@ async def run_audit_forever(sf, settings, sleep_seconds: int = 3600) -> None:
 async def _schedule_repo(s, settings, repo_id, now):
     from sqlalchemy import select
     from argus.domain.models import AuditRun, Learning, Repository
-    from argus.gitlab.client import GitLabClient
+    from argus.providers import create_provider, repository_key, workspace_for
     from argus.knowledge.audit_job import enqueue_audit
     from argus.knowledge.audit_pick import changed_paths_since, count_due
     from argus.knowledge.auditor import resolve_audit_ref
     from argus.knowledge.maintenance_state import read_cursor, write_cursor
-    from argus.review.workspace import WorkspaceManager
 
     repo = await s.get(Repository, repo_id)
     if repo is None or not repo.enabled:
@@ -106,13 +104,12 @@ async def _schedule_repo(s, settings, repo_id, now):
         tracked = [row for row in tracked if row.file_paths]
         if tracked:
             ref = await resolve_audit_ref(s, repo)
-            client = GitLabClient(settings.gitlab_url, settings.gitlab_token,
-                                 settings.gitlab_ca_bundle or settings.gitlab_ssl_verify)
+            client = create_provider(settings, repo)
             try:
                 if ref == "HEAD":
-                    project = await client.get_project(repo.gitlab_project_id)
+                    project = await client.get_project(repository_key(repo))
                     ref = project.get("default_branch")
-                branch = await client.get_branch(repo.gitlab_project_id, ref) if ref else None
+                branch = await client.get_branch(repository_key(repo), ref) if ref else None
                 if branch is None:
                     logger.warning("audit branch %r unavailable for repo %s", ref, repo.id)
                     return
@@ -129,13 +126,10 @@ async def _schedule_repo(s, settings, repo_id, now):
                       for r in tracked]
             fingerprint = hashlib.sha256(json.dumps(inputs).encode()).hexdigest()
             cursor = {"ref": ref, "sha": sha, "inputs": fingerprint,
-                      "provider_url": settings.gitlab_url, "project": repo.project_path}
+                      "provider": repo.provider, "project": repo.project_path}
             if await read_cursor(s, repo.id, "audit_cursor") == cursor:
                 return
-            wm = WorkspaceManager(
-                Path(settings.workspace_root).expanduser() / str(repo.id),
-                f"{settings.gitlab_url.replace('://', f'://oauth2:{settings.gitlab_token}@')}"
-                f"/{repo.project_path}.git")
+            wm = workspace_for(settings, repo, client)
             acquired = False
             try:
                 # If every learning was checked at this very tip, no checkout

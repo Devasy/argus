@@ -324,6 +324,9 @@ def _posted_line(should_publish: bool, posted: int, recorded: int, closed: str |
 
 
 async def publish_review(state: ReviewState, deps) -> CompiledReview:
+    if getattr(deps.gitlab, "provider_name", "gitlab") == "github":
+        from argus.review.preview import save_preview
+        return await save_preview(state, deps)
     # Short-circuits, so a dry run never pays for the MR-state call.
     closed = await _mr_closed_state(deps) if deps.publish else None
     should_publish = deps.publish and closed is None

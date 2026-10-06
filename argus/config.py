@@ -16,9 +16,19 @@ class Settings(BaseSettings):
     gitlab_token: str = ""
     gitlab_ca_bundle: str | None = None
     gitlab_ssl_verify: bool = True
+    github_token: str = ""
+    github_app_id: str = ""
+    github_installation_id: str = ""
+    github_app_private_key_path: str = ""
+    # Conservative local budgets. Set these below your project's AI Studio limits.
+    gemini_free_rpm: int = 5
+    gemini_free_tpm: int = 16000
+    gemini_free_rpd: int = 100
 
     embedding_model: str = "ollama/nomic-embed-text"
     embedding_dim: int = 768
+    embedding_api_key_ref: str = "GEMINI_API_KEY"
+    repository_knowledge_only: bool = False
     ollama_base_url: str = "http://localhost:11434"
     validate_embeddings_on_boot: bool = False
 

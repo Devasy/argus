@@ -17,7 +17,15 @@ import ThreadCard from "../../components/ThreadCard";
 import Toggle from "../../components/Toggle";
 import { fmtTokens } from "../../lib/pipelineGraph";
 
-function TriggerDialog({ mrId, onClose }: { mrId: string; onClose: () => void }) {
+function TriggerDialog({
+  mrId,
+  github,
+  onClose,
+}: {
+  mrId: string;
+  github: boolean;
+  onClose: () => void;
+}) {
   const proxies = useProxies();
   const profiles = useProfiles();
   const [reviewer, setReviewer] = useState("");
@@ -45,19 +53,26 @@ function TriggerDialog({ mrId, onClose }: { mrId: string; onClose: () => void })
     <Modal title="Trigger review" onClose={onClose}>
       <div className="form-grid">
         {error && <ErrorBox message={error} />}
-        <div>
-          <label htmlFor="reviewer">Reviewer proxy (optional — default endpoint if empty)</label>
-          <select id="reviewer" value={reviewer} onChange={(e) => setReviewer(e.target.value)}>
-            <option value="">Default LLM endpoint</option>
-            {(proxies.data ?? [])
-              .filter((p) => p.enabled)
-              .map((p) => (
-                <option key={p.id} value={p.reviewer}>
-                  {p.reviewer}
-                </option>
-              ))}
-          </select>
-        </div>
+        {github && (
+          <p>
+            Gemini will prepare a saved preview. You can publish it after inspecting the result.
+          </p>
+        )}
+        {!github && (
+          <div>
+            <label htmlFor="reviewer">Reviewer proxy (optional — default endpoint if empty)</label>
+            <select id="reviewer" value={reviewer} onChange={(e) => setReviewer(e.target.value)}>
+              <option value="">Default LLM endpoint</option>
+              {(proxies.data ?? [])
+                .filter((p) => p.enabled)
+                .map((p) => (
+                  <option key={p.id} value={p.reviewer}>
+                    {p.reviewer}
+                  </option>
+                ))}
+            </select>
+          </div>
+        )}
         <div>
           <label htmlFor="profile">Reviewer profile (optional — repo default if empty)</label>
           <select id="profile" value={profileId} onChange={(e) => setProfileId(e.target.value)}>
@@ -167,13 +182,18 @@ export default function MRDetail() {
                 <Link to="/repos">Repositories</Link> / MR
               </div>
               <h1>
-                <span className="mono">!{detail.data.mr.mr_iid}</span> {detail.data.mr.title}
+                <span className="mono">
+                  {detail.data.provider === "github" ? "#" : "!"}
+                  {detail.data.mr.mr_iid}
+                </span>{" "}
+                {detail.data.mr.title}
               </h1>
               <div className="row" style={{ marginTop: 6 }}>
                 <StatusBadge status={detail.data.mr.state} />
                 <span className="muted">by {detail.data.mr.author_username ?? "unknown"}</span>
                 <a href={detail.data.mr.web_url} target="_blank" rel="noreferrer">
-                  GitLab <ExternalLink size={12} />
+                  {detail.data.provider === "github" ? "GitHub" : "GitLab"}{" "}
+                  <ExternalLink size={12} />
                 </a>
               </div>
             </div>
@@ -313,7 +333,13 @@ export default function MRDetail() {
         </>
       )}
 
-      {triggering && mrId && <TriggerDialog mrId={mrId} onClose={() => setTriggering(false)} />}
+      {triggering && mrId && (
+        <TriggerDialog
+          mrId={mrId}
+          github={detail.data?.provider === "github"}
+          onClose={() => setTriggering(false)}
+        />
+      )}
     </div>
   );
 }

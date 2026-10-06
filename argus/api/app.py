@@ -64,7 +64,8 @@ from argus.domain.models import (Actor, AuditRun, AuditStage, AuditVerdict, Dist
                                      ReviewerProfile, ReviewerProxy,
                                      ReviewReviewerAgentVersion,
                                      ReviewStage, ToolCall)
-from argus.gitlab.client import GitLabClient
+from argus.providers import create_provider, repository_key
+from argus.providers.base import GitProvider
 from argus.ingest.poller import run_poller_forever
 from argus.jobs.queue import enqueue, run_worker_forever
 from argus.knowledge.distill_threads import enqueue_ready_threads
@@ -141,7 +142,7 @@ def _stage_dict(r: ReviewStage) -> dict:
 async def _run_distill_mr_job(sf, settings, payload: dict,
                               endpoint_name: str | None = None) -> None:
     from argus.domain.models import DistillationRun, MergeRequest, Repository
-    from argus.gitlab.client import GitLabClient
+    from argus.providers import create_provider
     from argus.jobs.workers import distill_llm_config
     from argus.knowledge import agentic_distiller as ad
     from argus.knowledge.distill_threads import load_threads, payload_discussion_ids
@@ -155,7 +156,14 @@ async def _run_distill_mr_job(sf, settings, payload: dict,
         if not threads:
             logger.info("distill job for MR %s has no threads with human notes; skipping", mr_id)
             return
-        llm_cfg = await distill_llm_config(session, endpoint_name)
+        if repo.provider == "github":
+            from argus.providers.settings import settings_for_repository, require_gemini, configure_quota
+            settings = await settings_for_repository(session, settings, repo.id)
+            llm_cfg = await resolve_llm_config(session, repo.default_llm_endpoint_id, None)
+            require_gemini(llm_cfg)
+            configure_quota(llm_cfg, settings)
+        else:
+            llm_cfg = await distill_llm_config(session, endpoint_name)
         # Without this, a single hung connection to the LLM endpoint blocks
         # forever with nothing to recover it -- unlike execute_review_job,
         # this path never set a request timeout (see the 2026-09-21 incident:
@@ -171,8 +179,7 @@ async def _run_distill_mr_job(sf, settings, payload: dict,
         await session.commit()
         run_id = run.id
 
-    verify = settings.gitlab_ca_bundle or settings.gitlab_ssl_verify
-    gitlab = GitLabClient(settings.gitlab_url, settings.gitlab_token, verify)
+    gitlab = create_provider(settings, repo)
     error = None
     decisions: dict = {}
     staged: list = []
@@ -180,6 +187,13 @@ async def _run_distill_mr_job(sf, settings, payload: dict,
         decisions, staged = await ad.run_thread_distillation(
             sf, settings, gitlab, repo, mr, threads, llm_cfg, distillation_run_id=run_id)
     except Exception as e:
+        from argus.llm.quota import QuotaDeferred
+        if isinstance(e, QuotaDeferred):
+            async with sf() as session:
+                run = await session.get(DistillationRun, run_id)
+                run.status, run.error = "failed", str(e)
+                await session.commit()
+            raise
         error = str(e)[:2000]
     finally:
         await gitlab.aclose()
@@ -188,6 +202,9 @@ async def _run_distill_mr_job(sf, settings, payload: dict,
         await ad.apply_decisions(sf, settings, repo, mr, threads, decisions, staged, run_id)
     except Exception as e:
         logger.exception("applying distill decisions for MR %s failed", mr_id)
+        from argus.llm.quota import QuotaDeferred
+        if isinstance(e, QuotaDeferred):
+            raise
         error = error or f"apply failed: {e}"[:2000]
 
     async with sf() as session:
@@ -222,9 +239,8 @@ def create_app(settings: Settings | None = None,
     admin_router = APIRouter(dependencies=[Depends(require_admin)])
     stop = asyncio.Event()
 
-    def _client() -> GitLabClient:
-        verify = settings.gitlab_ca_bundle or settings.gitlab_ssl_verify
-        return GitLabClient(settings.gitlab_url, settings.gitlab_token, verify)
+    def _client(repo=None, provider=None) -> GitProvider:
+        return create_provider(settings, repo, provider=provider)
 
     @app.on_event("startup")
     async def _startup():
@@ -272,6 +288,10 @@ def create_app(settings: Settings | None = None,
             app.state.poller = asyncio.create_task(
                 run_poller_forever(sf, _client, stop, boot.poll_interval_s,
                                    get_interval=_interval))
+        if getattr(boot, "poller_enabled", False) and (boot.github_token or boot.github_app_id):
+            app.state.github_poller = asyncio.create_task(run_poller_forever(
+                sf, lambda: _client(provider="github"), stop, boot.poll_interval_s,
+                provider_name="github"))
         if getattr(boot, "audit_enabled", False):
             app.state.auditor = asyncio.create_task(
                 run_audit_forever(sf, boot, sleep_seconds=3600))
@@ -399,14 +419,18 @@ def create_app(settings: Settings | None = None,
 
     @router.post("/repositories", status_code=201, response_model=RepositoryOut)
     async def create_repository(payload: RepositoryCreate):
-        client = _client()
+        if payload.provider == "github":
+            raise HTTPException(422, "import a selected PR using /imports/github-pull-request")
+        client = _client(provider=payload.provider)
         try:
             project = await client.get_project(payload.project_path)
         finally:
             await client.aclose()
         async with sf() as session:
             repo = Repository(project_path=project["path_with_namespace"],
-                              gitlab_project_id=project["id"],
+                              provider=payload.provider,
+                              provider_project_id=str(project["id"]),
+                              gitlab_project_id=project["id"] if payload.provider == "gitlab" else None,
                               default_branch=project.get("default_branch"))
             session.add(repo)
             await session.commit()
@@ -449,6 +473,10 @@ def create_app(settings: Settings | None = None,
             repo = await session.get(Repository, repo_id)
             if repo is None:
                 raise HTTPException(404, "repository not found")
+            if payload.default_llm_endpoint_id is not None:
+                from argus.domain.models import LLMEndpoint
+                if await session.get(LLMEndpoint, payload.default_llm_endpoint_id) is None:
+                    raise HTTPException(422, "unknown model endpoint")
             if payload.poll_interval_s is not None and payload.poll_interval_s < 10:
                 raise HTTPException(422, "poll_interval_s must be >= 10")
             if payload.stale_mr_after_days is not None and payload.stale_mr_after_days < 1:
@@ -477,7 +505,8 @@ def create_app(settings: Settings | None = None,
         from argus.domain.models import (ReviewerAgent,
                                              ReviewerAgentRepoSetting)
         async with sf() as session:
-            if await session.get(Repository, repo_id) is None:
+            primary = await session.get(Repository, repo_id)
+            if primary is None:
                 raise HTTPException(404, "repository not found")
             agents = (await session.execute(
                 select(ReviewerAgent).order_by(ReviewerAgent.name))).scalars().all()
@@ -547,20 +576,23 @@ def create_app(settings: Settings | None = None,
         if repo_id in ids:
             raise HTTPException(422, "a repository cannot be related to itself")
         async with sf() as session:
-            if await session.get(Repository, repo_id) is None:
+            primary = await session.get(Repository, repo_id)
+            if primary is None:
                 raise HTTPException(404, "repository not found")
             sisters = {r.id: r for r in (await session.execute(
                 select(Repository).where(Repository.id.in_(ids)))).scalars().all()} if ids else {}
             missing = [str(i) for i in ids if i not in sisters]
             if missing:
                 raise HTTPException(422, f"unknown repository: {', '.join(missing)}")
+            if ids and (primary.provider == "github" or any(s.provider != primary.provider for s in sisters.values())):
+                raise HTTPException(422, "related repositories are disabled for the isolated GitHub pilot and must share a provider")
             fixed = [p for p in payload if p.branch and p.branch.strip()]
             if fixed:
-                client = _client()
+                client = _client(primary)
                 try:
                     for p in fixed:
                         sister = sisters[p.sister_repo_id]
-                        if await client.get_branch(sister.gitlab_project_id, p.branch.strip()) is None:
+                        if await client.get_branch(repository_key(sister), p.branch.strip()) is None:
                             raise HTTPException(
                                 422, f"branch {p.branch.strip()!r} not found in {sister.project_path}")
                 finally:
@@ -663,6 +695,7 @@ def create_app(settings: Settings | None = None,
             if mr is None:
                 raise HTTPException(404)
             author = await session.get(Actor, mr.author_id) if mr.author_id else None
+            repo = await session.get(Repository, mr.repo_id)
             rows = (await session.execute(
                 select(Note, Actor.username)
                 .join(Actor, Note.author_id == Actor.id, isouter=True)
@@ -689,6 +722,7 @@ def create_app(settings: Settings | None = None,
                 .order_by(DistillationRun.created_at.desc()))).scalars().all()
             threads = await build_threads(session, mr)
             return MergeRequestDetail(
+                provider=repo.provider,
                 mr=MergeRequestOut(id=mr.id, mr_iid=mr.mr_iid, title=mr.title,
                                    state=mr.state,
                                    author_username=author.username if author else None,
@@ -971,6 +1005,7 @@ def create_app(settings: Settings | None = None,
             mr = await session.get(MergeRequest, mr_id)
             if mr is None:
                 raise HTTPException(404)
+            repo = await session.get(Repository, mr.repo_id)
             proxy_url = None
             if payload.reviewer is not None:
                 proxy = (await session.execute(select(ReviewerProxy).where(
@@ -981,8 +1016,13 @@ def create_app(settings: Settings | None = None,
                         404, f"no enabled proxy registered for reviewer {payload.reviewer!r}")
                 proxy_url = proxy.proxy_url
             try:
-                cfg = await resolve_llm_config(session, payload.llm_endpoint_id,
+                cfg = await resolve_llm_config(session, payload.llm_endpoint_id or repo.default_llm_endpoint_id,
                                                proxy_url)
+                if repo.provider == "github":
+                    from argus.providers.settings import require_gemini
+                    require_gemini(cfg)
+                    if proxy_url:
+                        raise ValueError("GitHub pilot uses its repository Gemini endpoint")
             except ValueError as e:
                 raise HTTPException(400, str(e))
             profile_version_id = None
@@ -1002,11 +1042,11 @@ def create_app(settings: Settings | None = None,
                             llm_config=cfg.model_dump(),
                             profile_version_id=profile_version_id,
                             force_agents=payload.force_agents,
-                            mode=payload.mode, publish=payload.publish)
+                            mode=payload.mode, publish=payload.publish if repo.provider != "github" else False)
             session.add(review)
             await session.flush()
             # pinned = the caller chose the endpoint, so no worker may re-route this review.
-            pinned = payload.llm_endpoint_id is not None or proxy_url is not None
+            pinned = payload.llm_endpoint_id is not None or proxy_url is not None or repo.default_llm_endpoint_id is not None
             job = await enqueue(session, "review",
                                 {"review_id": str(review.id), "pinned": pinned},
                                 # Dry runs get their own key so a benchmarking
@@ -1016,7 +1056,7 @@ def create_app(settings: Settings | None = None,
                                 # so poller- and manually-triggered real
                                 # reviews still dedup against each other.
                                 dedup_key=(f"review:{mr_id}:{payload.mode}"
-                                           if payload.publish
+                                           if review.publish
                                            else f"review:{mr_id}:{payload.mode}:dry"))
             if job is None:
                 raise HTTPException(409, "a review for this MR is already in flight")
@@ -1032,7 +1072,7 @@ def create_app(settings: Settings | None = None,
             repo = await session.get(Repository, mr.repo_id)
             if repo is None:
                 raise HTTPException(404, "repository not found for this MR")
-            client = _client()
+            client = _client(repo)
             try:
                 result = await reconcile_mr(session, client, repo, mr, settings)
             finally:
@@ -1109,6 +1149,12 @@ def create_app(settings: Settings | None = None,
                 .order_by(ReviewStage.started_at))).scalars().all()
             return {"id": str(review.id), "mr_id": str(review.mr_id),
                     "status": review.status, "publish": review.publish,
+                    "publication_status": review.publication_status,
+                    "publication_result": review.publication_result,
+                    "publication_preview": ({"body": review.publication_artifact["body"],
+                        "comments": [{k: v for k, v in c.items() if k != "finding_db_id"}
+                                     for c in review.publication_artifact["comments"]]}
+                        if review.publication_artifact else None),
                     "summary": review.summary, "error": review.error,
                     "started_at": review.started_at.isoformat() if review.started_at else None,
                     "finished_at": review.finished_at.isoformat() if review.finished_at else None,
@@ -1601,6 +1647,8 @@ def create_app(settings: Settings | None = None,
 
     app.include_router(router)
     app.include_router(admin_router)
+    from argus.api.integrations import integrations_router
+    app.include_router(integrations_router(sf, settings, require_user, require_admin))
     return app
 
 

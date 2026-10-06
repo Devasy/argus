@@ -98,9 +98,10 @@ def _commit_of(bare: Path, ref: str) -> str:
 
 
 class WorkspaceManager:
-    def __init__(self, root: Path, clone_url: str):
+    def __init__(self, root: Path, clone_url: str, *, review_ref=None):
         self.root = Path(root)
         self.clone_url = clone_url
+        self.review_ref = review_ref or (lambda number: f"refs/merge-requests/{number}/head")
         self.bare = self.root / "bare.git"
         # Worktrees this instance acquired, so a release after a failed acquire can't drop another job's hold.
         self._held: set[str] = set()
@@ -141,9 +142,9 @@ class WorkspaceManager:
                 # head pointed at it regardless of branch deletion, so fetch
                 # that too rather than requiring the branch to be alive.
                 try:
+                    review_ref = self.review_ref(mr_iid)
                     git(["git", "fetch", "origin",
-                          f"+refs/merge-requests/{mr_iid}/head:"
-                          f"refs/merge-requests/{mr_iid}/head"], cwd=self.bare)
+                          f"+{review_ref}:{review_ref}"], cwd=self.bare)
                 except RuntimeError:
                     # GitLab does not keep that ref forever: verified live
                     # against a real MR squash-merged 2+ weeks earlier with

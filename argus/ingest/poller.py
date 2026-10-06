@@ -11,8 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from argus.domain.models import (Job, MergeRequest, MRVersion, Note,
                                      RawEvent, Repository, Review,
                                      ReviewerProfile)
-from argus.gitlab.client import GitLabClient
-from argus.gitlab.normalizer import sync_merge_request
+from argus.providers import repository_key
+from argus.providers.base import GitProvider
+from argus.ingest.normalizer import sync_merge_request
 from argus.ingest.reconciler import reconcile_mr
 from argus.jobs.queue import enqueue
 from argus.knowledge.distill_threads import enqueue_ready_threads, sweep_pending_threads
@@ -31,6 +32,8 @@ async def _maybe_auto_review(session: AsyncSession, repo: Repository,
                              mr_row: MergeRequest, llm_healthy: bool) -> None:
     if not repo.auto_review_enabled or mr_row.draft or mr_row.state != "opened":
         return
+    if repo.provider == "github":
+        return  # The selected-PR pilot requires a user-triggered preview.
     prior_version = await last_reviewed_version(session, mr_row.id)
     if prior_version is not None and prior_version.head_commit_sha == mr_row.head_sha:
         return
@@ -149,14 +152,14 @@ def repo_in_learnings_cooldown(repo: Repository, now: datetime) -> bool:
     return (now - created_at).total_seconds() < repo.learnings_cooldown_hours * 3600
 
 
-async def _sync_and_reconcile_mr(session: AsyncSession, client: GitLabClient,
+async def _sync_and_reconcile_mr(session: AsyncSession, client: GitProvider,
                                  repo: Repository, iid: int,
                                  bot_usernames: set[str], llm_healthy: bool) -> None:
-    mr_payload = await client.get_merge_request(repo.gitlab_project_id, iid)
-    discussions = await client.list_discussions(repo.gitlab_project_id, iid)
-    versions = await client.list_versions(repo.gitlab_project_id, iid)
-    approvals = await client.get_approvals(repo.gitlab_project_id, iid)
-    reviewers = await client.get_reviewers(repo.gitlab_project_id, iid)
+    mr_payload = await client.get_merge_request(repository_key(repo), iid)
+    discussions = await client.list_discussions(repository_key(repo), iid)
+    versions = await client.list_versions(repository_key(repo), iid)
+    approvals = await client.get_approvals(repository_key(repo), iid)
+    reviewers = await client.get_reviewers(repository_key(repo), iid)
     session.add(RawEvent(repo_id=repo.id, mr_iid=iid, event_type="mr_sweep",
                          payload={"mr": mr_payload, "approvals": approvals,
                                   "reviewers": reviewers}))
@@ -170,12 +173,15 @@ async def _sync_and_reconcile_mr(session: AsyncSession, client: GitLabClient,
                                     quiet_hours=eff.distill_quiet_hours)
 
 
-async def poll_repo(session: AsyncSession, client: GitLabClient,
+async def poll_repo(session: AsyncSession, client: GitProvider,
                     repo: Repository, bot_usernames: set[str],
                     llm_healthy: bool) -> int:
     cursor = (repo.poll_cursor or {}).get("updated_after")
-    mrs = await client.list_merge_requests(repo.gitlab_project_id,
-                                           updated_after=cursor, state="all")
+    selected_kwargs = ({"selected_iids": (repo.poll_cursor or {}).get("selected_iids", [])}
+                       if getattr(getattr(client, "capabilities", None), "selected_requests", False)
+                       else {})
+    mrs = await client.list_merge_requests(repository_key(repo),
+                                           updated_after=cursor, state="all", **selected_kwargs)
     newest = cursor
     count = 0
     cursor_fetched_iids: set[int] = set()
@@ -221,8 +227,8 @@ async def poll_repo(session: AsyncSession, client: GitLabClient,
 
 async def run_poller_forever(sf: async_sessionmaker, client_factory,
                              stop: asyncio.Event, interval_s: int = 120,
-                             get_interval=None) -> None:
-    client: GitLabClient = client_factory()
+                             get_interval=None, provider_name: str = "gitlab") -> None:
+    client: GitProvider = client_factory()
     bot_usernames: set[str] = set()
     while not stop.is_set():
         # Syncing without knowing our own account files argus's comments as human
@@ -251,7 +257,8 @@ async def run_poller_forever(sf: async_sessionmaker, client_factory,
                     pass  # no endpoint configured -- _maybe_auto_review handles this
                 repos = (await session.execute(
                     select(Repository.id, Repository.project_path)
-                    .where(Repository.enabled == True)  # noqa: E712
+                    .where(Repository.enabled == True,  # noqa: E712
+                           Repository.provider == provider_name)
                 )).all()
             # Each repo gets its own session so a failure reconciling one repo
             # (e.g. a bad row rejected by the DB) can't expire/abort the ORM

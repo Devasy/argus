@@ -209,6 +209,8 @@ def _model(deps: PipelineDeps, review_id: str, stage_name: str,
     cb = DBTraceCallback(deps.sf, stage_name, review_id=uuid.UUID(review_id))
     llm_cfg = deps.llm_cfg
     if model_override:
+        if deps.llm_cfg.provider == "gemini" and not model_override.startswith("gemini/"):
+            raise ValueError("GitHub Gemini specialist overrides must use a Gemini model")
         llm_cfg = llm_cfg.model_copy(update={"model": model_override})
     # llm_cfg.langfuse_handler is already bound onto the model itself (see
     # build_chat_model), which is enough for LLM generation spans -- but a
@@ -734,6 +736,9 @@ def build_graph(deps: PipelineDeps, checkpointer):
             except (ReviewCanceled, asyncio.CancelledError):
                 raise
             except Exception as e:
+                from argus.llm.quota import QuotaDeferred
+                if isinstance(e, QuotaDeferred):
+                    raise
                 if attempt == 2:
                     logger.exception("chunk %s failed twice; skipping",
                                      chunk.chunk_id)
@@ -852,6 +857,9 @@ def build_graph(deps: PipelineDeps, checkpointer):
             except (ReviewCanceled, asyncio.CancelledError):
                 raise
             except Exception as e:
+                from argus.llm.quota import QuotaDeferred
+                if isinstance(e, QuotaDeferred):
+                    raise
                 if attempt == 2:
                     logger.exception("qa_chunk %s failed twice; skipping",
                                      chunk.chunk_id)

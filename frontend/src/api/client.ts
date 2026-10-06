@@ -35,6 +35,7 @@ import type {
   ReviewerGraph,
   CommentSourceStats,
   Me,
+  ModelEndpoint,
 } from "./types";
 
 const BASE = "/api";
@@ -106,6 +107,23 @@ export async function checkHealth(): Promise<boolean> {
 }
 
 export const api = {
+  githubStatus: () =>
+    http<{ configured: boolean; username: string | null; error?: string }>("/integrations/github"),
+  importGithubPR: (url: string) =>
+    http<{ repo_id: string; mr_id: string; web_url: string }>("/imports/github-pull-request", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    }),
+  modelEndpoints: () => http<ModelEndpoint[]>("/llm-endpoints"),
+  saveModelEndpoint: (body: Omit<ModelEndpoint, "id" | "secret_present">, id?: string) =>
+    http<ModelEndpoint>(id ? `/llm-endpoints/${id}` : "/llm-endpoints", {
+      method: id ? "PUT" : "POST",
+      body: JSON.stringify(body),
+    }),
+  testModelEndpoint: (id: string) =>
+    http<{ ok: boolean; response: string }>(`/llm-endpoints/${id}/test`, { method: "POST" }),
+  publishPreview: (id: string) =>
+    http<{ id: number; url: string | null }>(`/reviews/${id}/publish`, { method: "POST" }),
   me: () => http<Me>("/me"),
   repositories: (params: { page?: number; per_page?: number } = {}) => {
     const qs = new URLSearchParams();
@@ -130,19 +148,23 @@ export const api = {
     }),
   reconcileAndDistill: (mrId: string) =>
     http<{ queued_runs: number; changed_dispositions: number }>(
-      `/merge-requests/${mrId}/reconcile-and-distill`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    }),
+      `/merge-requests/${mrId}/reconcile-and-distill`,
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+    ),
   review: (reviewId: string) => http<Review>(`/reviews/${reviewId}`),
   trace: (reviewId: string) => http<Trace>(`/reviews/${reviewId}/trace`),
-  reviews: (params: {
-    status?: string;
-    repo_id?: string;
-    profile_id?: string;
-    page?: number;
-    per_page?: number;
-  } = {}) => {
+  reviews: (
+    params: {
+      status?: string;
+      repo_id?: string;
+      profile_id?: string;
+      page?: number;
+      per_page?: number;
+    } = {},
+  ) => {
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) if (v !== undefined) qs.set(k, String(v));
     return http<Paginated<ReviewListItem>>(`/reviews?${qs}`);
@@ -228,15 +250,13 @@ export const api = {
     for (const [k, v] of Object.entries(params)) if (v !== undefined) qs.set(k, String(v));
     return http<PaginatedComplaints>(`/complaints?${qs}`);
   },
-  repoSisters: (repoId: string) =>
-    http<RepoSisterLink[]>(`/repositories/${repoId}/sisters`),
+  repoSisters: (repoId: string) => http<RepoSisterLink[]>(`/repositories/${repoId}/sisters`),
   setRepoSisters: (repoId: string, links: RepoSisterLinkIn[]) =>
     http<RepoSisterLink[]>(`/repositories/${repoId}/sisters`, {
       method: "PUT",
       body: JSON.stringify(links),
     }),
-  repoAgents: (repoId: string) =>
-    http<RepoAgentSetting[]>(`/repositories/${repoId}/agents`),
+  repoAgents: (repoId: string) => http<RepoAgentSetting[]>(`/repositories/${repoId}/agents`),
   setRepoAgent: (repoId: string, agentId: string, enabled: boolean) =>
     http<RepoAgentSetting>(`/repositories/${repoId}/agents/${agentId}`, {
       method: "PUT",
@@ -260,8 +280,7 @@ export const api = {
     for (const [k, v] of Object.entries(params)) if (v !== undefined) qs.set(k, String(v));
     return http<Paginated<FileKnowledgeEntry>>(`/file-knowledge?${qs}`);
   },
-  dashboardStats: (days: number) =>
-    http<DashboardStats>(`/stats/dashboard?days=${days}`),
+  dashboardStats: (days: number) => http<DashboardStats>(`/stats/dashboard?days=${days}`),
   submitNoteVerdict: (noteId: string, body: NoteVerdictIn) =>
     http<Note>(`/notes/${noteId}/verdict`, {
       method: "PUT",

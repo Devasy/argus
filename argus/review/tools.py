@@ -367,13 +367,14 @@ def build_skill_tools(workspace: Path, skills: list[dict]) -> list:
     return [list_module_skills, read_module_skill]
 
 
-def build_learning_tool(sf: async_sessionmaker):
+def build_learning_tool(sf: async_sessionmaker, repo_id=None):
     @tool
     async def get_learning(learning_id: str) -> str:
         """Fetch the full text of a team learning by its short id from the index."""
         async with sf() as s:
             row = (await s.execute(select(Learning).where(
-                cast(Learning.id, SAText).like(f"{learning_id}%")
+                cast(Learning.id, SAText).like(f"{learning_id}%"),
+                Learning.repo_id == repo_id if repo_id else True
             ).limit(1))).scalar_one_or_none()
         if row is None:
             return f"no learning with id {learning_id}"

@@ -4,12 +4,12 @@ import logging
 import subprocess
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 from sqlalchemy import select
 
 from argus.domain.models import AuditRun, Repository
 from argus.jobs.queue import enqueue
+from argus.providers import create_provider, workspace_for
 
 logger = logging.getLogger("argus.audit_job")
 
@@ -53,7 +53,6 @@ async def run_audit_job(sf, settings, payload: dict, endpoint_name: str | None) 
     from argus.knowledge.auditor import resolve_audit_ref
     from argus.knowledge.graphify import build_graph
     from argus.llm.langfuse_run import LangfuseRun
-    from argus.review.workspace import WorkspaceManager
 
     run_id = uuid.UUID(payload["audit_run_id"])
     pg_url = settings.database_url.replace("+asyncpg", "")
@@ -70,7 +69,15 @@ async def run_audit_job(sf, settings, payload: dict, endpoint_name: str | None) 
             # its branch moved while the worker was offline.
             ref = run.commit_sha or await resolve_audit_ref(s, repo)
             # same "worker endpoint else default" rule the distill lanes use
-            llm_cfg = await distill_llm_config(s, endpoint_name)
+            if repo.provider == "github":
+                from argus.providers.settings import settings_for_repository, require_gemini, configure_quota
+                from argus.llm.config import resolve_llm_config
+                settings = await settings_for_repository(s, settings, repo.id)
+                llm_cfg = await resolve_llm_config(s, repo.default_llm_endpoint_id, None)
+                require_gemini(llm_cfg)
+                configure_quota(llm_cfg, settings)
+            else:
+                llm_cfg = await distill_llm_config(s, endpoint_name)
             await s.commit()
         llm_cfg.timeout = settings.review_llm_timeout_s
         langfuse_run = LangfuseRun.start(
@@ -79,10 +86,11 @@ async def run_audit_job(sf, settings, payload: dict, endpoint_name: str | None) 
             metadata={"audit_run_id": str(run_id), "repo": repo.project_path})
         if langfuse_run.handler is not None:
             llm_cfg = llm_cfg.model_copy(update={"langfuse_handler": langfuse_run.handler})
-        wm = WorkspaceManager(
-            Path(settings.workspace_root).expanduser() / str(repo.id),
-            f"{settings.gitlab_url.replace('://', f'://oauth2:{settings.gitlab_token}@')}"
-            f"/{repo.project_path}.git")
+        provider = create_provider(settings, repo)
+        if repo.provider == "github":
+            await provider.get_project(repo.project_path)
+        wm = workspace_for(settings, repo, provider)
+        await provider.aclose()
         workspace = await wm.acquire(ref)
         head = await asyncio.to_thread(subprocess.run, ["git", "rev-parse", "HEAD"],
                                        cwd=workspace, capture_output=True, text=True, timeout=30)
@@ -107,6 +115,13 @@ async def run_audit_job(sf, settings, payload: dict, endpoint_name: str | None) 
         # leave the run 'running': the requeued job resumes it from the checkpoint
         raise
     except Exception as e:
+        from argus.llm.quota import QuotaDeferred
+        if isinstance(e, QuotaDeferred):
+            async with sf() as s:
+                row = await s.get(AuditRun, run_id)
+                row.status, row.error = "queued", str(e)
+                await s.commit()
+            raise
         logger.exception("audit run %s failed", run_id)
         error = str(e)[:2000]
     finally:

@@ -1,9 +1,11 @@
 # argus
 
-argus is a GitLab merge-request review platform being built from scratch.
-This repository currently contains a **read-only ingestion skeleton**: a GitLab
-client, an idempotent payload normalizer, a cursor-based sync poller, and a
-minimal read API. There is no review/LLM logic yet.
+Argus reviews merge requests and pull requests, with ingestion, model-driven
+reviews, reusable learnings and learning audits. GitLab uses its existing
+integration; the public GitHub pilot supports selected PR imports and Gemini
+reviews with saved previews before publication.
+
+See [GitHub OSS pilot setup and acceptance checks](docs/github-oss-pilot.md).
 
 ## Requirements
 

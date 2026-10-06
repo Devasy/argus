@@ -20,7 +20,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from argus.config import Settings
 from argus.domain.models import DistillationRun, MergeRequest, Repository
-from argus.gitlab.client import GitLabClient
+from argus.providers import repository_key, workspace_for
+from argus.providers.base import GitProvider
 from argus.knowledge.graphify import build_graph, build_graphify_tool
 from argus.knowledge.learnings import relevant_learnings
 from argus.llm.config import LLMConfig
@@ -32,7 +33,6 @@ from argus.review.tools import (ToolContext, build_file_knowledge_tool,
                                     build_learning_tool, build_learnings_search_tool,
                                     build_read_tools, build_report_problem_tool,
                                     build_skill_tools, discover_module_skills)
-from argus.review.workspace import WorkspaceManager
 
 logger = logging.getLogger("argus.agentic_distiller")
 
@@ -209,11 +209,16 @@ retried later and its proposals are discarded.
 
 
 async def run_thread_distillation(
-    sf: async_sessionmaker, settings: Settings, gitlab: GitLabClient,
+    sf: async_sessionmaker, settings: Settings, gitlab: GitProvider,
     repo: Repository, mr: MergeRequest, threads: list, llm_cfg: LLMConfig, *,
     distillation_run_id: uuid.UUID | None,
 ) -> tuple[dict, list]:
     """One agent over up to MAX_THREADS_PER_RUN threads; returns (validated decisions, staged learnings)."""
+    from argus.providers.settings import settings_for_repository
+    async with sf() as session:
+        settings = await settings_for_repository(session, settings, repo.id)
+    if repo.provider == "github":
+        await gitlab.get_project(repo.project_path)
     from argus.knowledge.distill_threads import format_threads
 
     # Langfuse, exactly as reviews and audits do it: the trace id is a pure
@@ -232,16 +237,14 @@ async def run_thread_distillation(
                 row.langfuse_trace_id = langfuse_run.trace_id
                 await s.commit()
 
-    diffs = await gitlab.list_diffs(repo.gitlab_project_id, mr.mr_iid)
+    diffs = await gitlab.list_diffs(repository_key(repo), mr.mr_iid)
     files, hunks = parse_diffs(diffs)
 
     workspace: Path | None = None
     graphify_tools: list = []
     skill_tools: list = []
     file_content_tools: list = []
-    wm = WorkspaceManager(
-        Path(settings.workspace_root).expanduser() / str(repo.id),
-        f"{settings.gitlab_url.replace('://', f'://oauth2:{settings.gitlab_token}@')}/{repo.project_path}.git")
+    wm = workspace_for(settings, repo, gitlab)
     try:
         workspace = await wm.acquire(mr.head_sha, mr.mr_iid)
     except Exception as e:
@@ -271,7 +274,7 @@ async def run_thread_distillation(
     staged: list = []
     learnings_tools = [
         build_learnings_search_tool(sf, settings, repo.id),
-        build_learning_tool(sf),
+        build_learning_tool(sf, repo.id if settings.repository_knowledge_only else None),
         build_propose_learning_tool(sf, settings, repo.id, threads, staged)]
     extra_tools = []
     if workspace is not None:
@@ -375,7 +378,10 @@ async def apply_decisions(sf, settings, repo, mr, threads, decisions, staged,
                 except ValueError:
                     counts["skipped_learnings"] += 1
                     continue
-                except Exception:
+                except Exception as error:
+                    from argus.llm.quota import QuotaDeferred
+                    if isinstance(error, QuotaDeferred):
+                        raise
                     logger.exception("writing a learning for thread %s failed", t.discussion_id)
                     counts["skipped_learnings"] += 1
                     errored = True

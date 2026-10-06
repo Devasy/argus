@@ -12,7 +12,7 @@ from argus.config import Settings
 from argus.domain.models import (Finding, LLMRound, MergeRequest,
                                      MRVersion, ProfileVersion, Repository,
                                      Review)
-from argus.gitlab.client import GitLabClient
+from argus.providers import create_provider, repository_key, workspace_for
 from argus.knowledge.graphify import build_graph, build_graphify_tool
 from argus.knowledge.learnings import (do_not_suggest, record_injections,
                                            relevant_learnings)
@@ -32,7 +32,6 @@ from argus.review.pipeline import PipelineDeps, run_review_pipeline
 from argus.review.tools import (ToolContext, build_file_knowledge_tool,
                                     build_learning_tool, build_skill_tools,
                                     discover_module_skills)
-from argus.review.workspace import WorkspaceManager
 
 logger = logging.getLogger("argus.runner")
 
@@ -45,11 +44,6 @@ def _should_preserve_canceled_status(review: Review) -> bool:
     review that wasn't canceled should transition to "failed"/"done".
     """
     return review.status == "canceled"
-
-
-def _clone_url(settings: Settings, project_path: str) -> str:
-    base = settings.gitlab_url.replace("://", f"://oauth2:{settings.gitlab_token}@")
-    return f"{base}/{project_path}.git"
 
 
 def _diff_signal(hunks: dict, max_chars: int = 2000) -> str:
@@ -89,7 +83,7 @@ async def fetch_consistent_mr(gitlab, project_id, mr_iid,
     for _ in range(attempts):
         diffs = await gitlab.list_diffs(project_id, mr_iid)
         after = await gitlab.get_merge_request(project_id, mr_iid)
-        if after["sha"] == mr["sha"]:
+        if after["sha"] == mr["sha"] and after.get("diff_refs") == mr.get("diff_refs"):
             return after, diffs
         mr = after
     raise RuntimeError(f"MR !{mr_iid} head kept moving during fetch; retry later")
@@ -110,9 +104,18 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
             return
         mr = await s.get(MergeRequest, review.mr_id)
         repo = await s.get(Repository, mr.repo_id)
+        from argus.providers.settings import settings_for_repository
+        settings = await settings_for_repository(s, settings, repo.id)
         review.status = "running"
         review.started_at = datetime.now(timezone.utc)
         llm_cfg = LLMConfig.model_validate(review.llm_config)
+        if repo.provider == "github":
+            from argus.providers.settings import require_gemini
+            require_gemini(llm_cfg)
+            from argus.providers.settings import configure_quota
+            configure_quota(llm_cfg, settings)
+            review.publish = False
+            llm_cfg.num_retries = 0
         llm_cfg.timeout = settings.review_llm_timeout_s
         if llm_cfg.provider == "ollama":
             llm_cfg.reasoning_budget_tokens = settings.reasoning_budget_tokens
@@ -183,11 +186,10 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
         review_mode = review.mode
         review_publish = review.publish
 
-    verify = settings.gitlab_ca_bundle or settings.gitlab_ssl_verify
-    gitlab = GitLabClient(settings.gitlab_url, settings.gitlab_token, verify)
-    wm = WorkspaceManager(Path(settings.workspace_root).expanduser() / str(repo.id),
-                          _clone_url(settings, repo.project_path))
+    gitlab = create_provider(settings, repo)
+    wm = workspace_for(settings, repo, gitlab)
     error: str | None = None
+    deferred = False
     skipped: str | None = None
     mr_payload: dict | None = None
     sister_held: list = []
@@ -197,8 +199,10 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
     # the actual trace can never disagree.
     review_span_stack.enter_context(langfuse_run.span("review"))
     try:
+        if repo.provider == "github":
+            await gitlab.get_project(repo.project_path)
         mr_payload, diffs = await fetch_consistent_mr(
-            gitlab, repo.gitlab_project_id, mr.mr_iid)
+            gitlab, repository_key(repo), mr.mr_iid)
         # A backlog can hold a review for hours; one whose MR closed meanwhile could never be posted.
         if review_publish and mr_payload.get("state", "opened") != "opened":
             skipped = (f"MR !{mr.mr_iid} was {mr_payload['state']} before the review "
@@ -239,7 +243,7 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
                 s, settings, repo_id=repo.id, query_text=query_text,
                 file_paths=changed_paths,
                 exclude_kinds=("do_not_suggest",))
-            dns = await do_not_suggest(s, repo_id=repo.id)
+            dns = await do_not_suggest(s, repo_id=repo.id, repository_only=settings.repository_knowledge_only)
             # Positive guidance goes to every stage (it helps FIND problems).
             # The two suppression blocks -- linter output and do-not-suggest --
             # are pure "do not report this" constraints that only bear on the
@@ -264,7 +268,7 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
                            and prior_version.head_commit_sha != mr_payload["sha"])
             if is_rereview:
                 changed = await changed_paths_since(
-                    gitlab, repo.gitlab_project_id, mr.mr_iid,
+                    gitlab, repository_key(repo), mr.mr_iid,
                     prior_version.head_commit_sha, mr_payload["sha"])
                 if changed is not None:
                     files = restrict_files(files, changed)
@@ -304,7 +308,7 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
                 and mr_payload.get("state") == "opened" and settings.followup_mode != "off"):
             try:
                 stats = await follow_up_prior_comments(
-                    sf, gitlab, repo.gitlab_project_id, mr.mr_iid, mr.id, mr_payload["sha"],
+                    sf, gitlab, repository_key(repo), mr.mr_iid, mr.id, mr_payload["sha"],
                     workspace, llm_cfg, settings.followup_mode)
                 logger.info("review %s follow-up: %s", review_id, stats)
             except Exception:
@@ -317,10 +321,12 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
                                               files_by_id={f.file_id: f for f in files})
                           if graph_path is not None else [])
 
-        sisters, sister_held, sister_record = await acquire_sisters(
-            sf, gitlab, repo.id, mr_payload.get("source_branch"),
-            Path(settings.workspace_root).expanduser(),
-            lambda path: _clone_url(settings, path), mr_payload.get("target_branch"))
+        sisters, sister_record = [], []
+        if not settings.repository_knowledge_only:
+            sisters, sister_held, sister_record = await acquire_sisters(
+                sf, gitlab, repo.id, mr_payload.get("source_branch"),
+                Path(settings.workspace_root).expanduser(),
+                gitlab.clone_url, mr_payload.get("target_branch"))
         if sister_record:
             mr_context = mr_context + "\n\n" + sister_prompt_block(sisters, sister_record)
             async with sf() as s:
@@ -343,9 +349,9 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
             learnings_paths=changed_paths,
             mr_context=mr_context,
             verify_context=verify_context,
-            gitlab=gitlab, project_id=repo.gitlab_project_id, mr_iid=mr.mr_iid,
+            gitlab=gitlab, project_id=repository_key(repo), mr_iid=mr.mr_iid,
             diff_refs=mr_payload.get("diff_refs") or {}, mr_db_id=mr.id,
-            extra_tools=[build_learning_tool(sf),
+            extra_tools=[build_learning_tool(sf, repo.id if settings.repository_knowledge_only else None),
                         build_file_knowledge_tool(sf, settings, repo.id, workspace),
                         *build_sister_tools(sisters)],
             graphify_tools=graphify_tools,
@@ -368,6 +374,8 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
         error = "review interrupted: worker process was shutting down or restarted"
         raise
     except Exception as e:
+        from argus.llm.quota import QuotaDeferred
+        deferred = isinstance(e, QuotaDeferred)
         from argus.review.pipeline import ReviewCanceled
         if isinstance(e, ReviewCanceled):
             logger.info("review %s canceled", review_id)
@@ -394,7 +402,7 @@ async def execute_review_job(sf: async_sessionmaker, settings: Settings,
             if skipped is not None:
                 review.status, review.error = "canceled", skipped
             elif not _should_preserve_canceled_status(review):
-                review.status = "failed" if error else "done"
+                review.status = "queued" if deferred else "failed" if error else "done"
                 review.error = error
             review.finished_at = datetime.now(timezone.utc)
             await s.commit()

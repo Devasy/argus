@@ -6,7 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from argus.domain.models import Discussion, DistillThread, Feedback, Note
-from argus.gitlab.client import GitLabClient
+from argus.providers import repository_key
+from argus.providers.base import GitProvider
 from argus.knowledge.distill_threads import content_hash
 
 logger = logging.getLogger("argus.reconciler")
@@ -121,9 +122,9 @@ async def _rate_human_reviewer_comments(session: AsyncSession, mr, bot_actor_ids
             [r.body for r in replies])
 
 
-async def reconcile_mr(session: AsyncSession, client: GitLabClient, repo, mr,
+async def reconcile_mr(session: AsyncSession, client: GitProvider, repo, mr,
                        settings) -> ReconcileResult:
-    diffs = await client.list_diffs(repo.gitlab_project_id, mr.mr_iid)
+    diffs = await client.list_diffs(repository_key(repo), mr.mr_iid)
     final_diff = "\n".join(d.get("diff") or "" for d in diffs)
     changed_note_ids: list = []
 
@@ -145,8 +146,10 @@ async def reconcile_mr(session: AsyncSession, client: GitLabClient, repo, mr,
         Feedback.payload["verdict"].as_string() == "addressed"))).scalars().all()) if bot_notes else set()
     for note in bot_notes:
         try:
-            awards = await client.get_note_awards(repo.gitlab_project_id,
-                                                  mr.mr_iid, note.provider_note_id)
+            kwargs = ({"note_key": f"{note.provider_note_kind}:{note.provider_note_id}"}
+                      if note.provider_note_kind != "note" else {})
+            awards = await client.get_note_awards(repository_key(repo),
+                                                  mr.mr_iid, note.provider_note_id, **kwargs)
         except Exception as e:
             logger.warning("award sweep failed for note %s: %s",
                            note.provider_note_id, e)

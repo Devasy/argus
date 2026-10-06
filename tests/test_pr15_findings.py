@@ -281,7 +281,7 @@ def remote(monkeypatch, tmp_path):
         releases = []
         fail_acquire = False
         paths = {"other.py"}
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             pass
         async def get_project(self, project):
             return {"default_branch": self.default_branch}

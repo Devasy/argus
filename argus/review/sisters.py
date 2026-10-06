@@ -8,6 +8,7 @@ from langchain_core.tools import tool
 from sqlalchemy import select
 
 from argus.domain.models import RepoSisterLink, Repository
+from argus.providers import repository_key
 from argus.review import navigation
 from argus.review.tools import _truncate_result
 from argus.review.workspace import WorkspaceManager
@@ -51,7 +52,7 @@ async def pick_branch(gitlab, sister: Repository, link: RepoSisterLink,
         tries.append((link.branch, "configured branch"))
     tries.append((sister.default_branch or "main", "default branch"))
     for branch, why in tries:
-        found = await gitlab.get_branch(sister.gitlab_project_id, branch)
+        found = await gitlab.get_branch(repository_key(sister), branch)
         if found:
             return branch, found["commit"]["id"], why
     return None

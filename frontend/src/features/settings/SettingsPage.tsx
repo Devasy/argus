@@ -8,12 +8,16 @@ import ObservabilitySection from "./sections/ObservabilitySection";
 import ProxiesSection from "./sections/ProxiesSection";
 import ApiAccessSection from "./sections/ApiAccessSection";
 import ProfilesSection from "./sections/ProfilesSection";
+import GitHubSection from "./sections/GitHubSection";
+import EndpointsSection from "./sections/EndpointsSection";
 
 const SECTIONS = [
   { slug: "profiles", label: "Review profiles", el: <ProfilesSection /> },
   { slug: "proxies", label: "Reviewer proxies", el: <ProxiesSection /> },
   { slug: "review-tuning", label: "Review tuning", el: <ReviewTuningSection /> },
   { slug: "gitlab", label: "GitLab connection", el: <GitLabSection /> },
+  { slug: "github", label: "GitHub connection", el: <GitHubSection /> },
+  { slug: "endpoints", label: "Model endpoints", el: <EndpointsSection /> },
   { slug: "poller", label: "Poller & worker", el: <PollerSection /> },
   { slug: "auditor", label: "Learning auditor", el: <AuditSection /> },
   { slug: "models", label: "Models & embeddings", el: <ModelsSection /> },

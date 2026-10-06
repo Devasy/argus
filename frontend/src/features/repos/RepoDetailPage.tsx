@@ -63,6 +63,7 @@ function EditRepoSettings({
   learningsCooldownHours,
   defaultProfileId,
   autoReviewEnabled,
+  github,
   onClose,
 }: {
   repoId: string;
@@ -71,6 +72,7 @@ function EditRepoSettings({
   learningsCooldownHours: number;
   defaultProfileId: string | null;
   autoReviewEnabled: boolean;
+  github: boolean;
   onClose: () => void;
 }) {
   const profiles = useProfiles();
@@ -105,7 +107,7 @@ function EditRepoSettings({
       <div className="f-row">
         <div className="fl">
           <b>Poll interval</b>
-          <span>seconds between GitLab polls for this repository</span>
+          <span>seconds between provider polls for this repository</span>
         </div>
         <input
           type="number"
@@ -118,8 +120,8 @@ function EditRepoSettings({
         <div className="fl">
           <b>Stale MR threshold</b>
           <span>
-            days without a new commit before an open MR is treated as abandoned and skipped by
-            the reconciliation sweep
+            days without a new commit before an open MR is treated as abandoned and skipped by the
+            reconciliation sweep
           </span>
         </div>
         <input
@@ -133,8 +135,8 @@ function EditRepoSettings({
         <div className="fl">
           <b>Learnings cooldown</b>
           <span>
-            hours after this repo is added before the poller starts mining learnings from its
-            MRs — keeps a large historical backfill from seeding the learnings store with old,
+            hours after this repo is added before the poller starts mining learnings from its MRs —
+            keeps a large historical backfill from seeding the learnings store with old,
             no-longer-relevant discussions. 0 disables the cooldown.
           </span>
         </div>
@@ -163,11 +165,16 @@ function EditRepoSettings({
         <div className="fl">
           <b>Auto-review on poll</b>
           <span>
-            automatically queue an incremental review when the poller sees a new commit on an
-            open, non-draft MR
+            automatically queue an incremental review when the poller sees a new commit on an open,
+            non-draft MR
           </span>
         </div>
-        <Toggle checked={autoReview} onChange={setAutoReview} label="Auto-review on poll" />
+        <Toggle
+          checked={autoReview}
+          onChange={setAutoReview}
+          disabled={github}
+          label="Auto-review on poll"
+        />
       </div>
       <RepoAgentsPanel repoId={repoId} />
       <div className="form-actions">
@@ -243,11 +250,14 @@ export default function RepoDetail() {
           learningsCooldownHours={repo.data.learnings_cooldown_hours}
           defaultProfileId={repo.data.default_profile_id}
           autoReviewEnabled={repo.data.auto_review_enabled}
+          github={repo.data.provider === "github"}
           onClose={() => setEditing(false)}
         />
       )}
 
-      {repo.data && <RepoSistersPanel key={repo.data.id} repoId={repo.data.id} />}
+      {repo.data && repo.data.provider !== "github" && (
+        <RepoSistersPanel key={repo.data.id} repoId={repo.data.id} />
+      )}
 
       {mrs.error && <ErrorBox message={mrs.error.message} onRetry={mrs.refetch} />}
       {mrs.isPending && <div className="spinner">Loading merge requests…</div>}
@@ -275,7 +285,7 @@ export default function RepoDetail() {
           <table className="ui-table">
             <thead>
               <tr>
-                <th>!IID</th>
+                <th>{repo.data?.provider === "github" ? "PR" : "!IID"}</th>
                 <th className="col-fill">Title</th>
                 <th>Author</th>
                 <th>State</th>
@@ -302,7 +312,10 @@ export default function RepoDetail() {
                   className="clickable"
                   onClick={() => navigate(`/mrs/${mr.id}`, { state: { mrTitle: mr.title } })}
                 >
-                  <td className="mono">!{mr.mr_iid}</td>
+                  <td className="mono">
+                    {repo.data?.provider === "github" ? "#" : "!"}
+                    {mr.mr_iid}
+                  </td>
                   <td className="col-fill">{mr.title}</td>
                   <td>{mr.author_username ?? "—"}</td>
                   <td>
@@ -326,7 +339,12 @@ export default function RepoDetail() {
                   </td>
                   <td className="muted">{formatDate(mr.mr_updated_at)}</td>
                   <td onClick={(e) => e.stopPropagation()}>
-                    <a href={mr.web_url} target="_blank" rel="noreferrer" title="Open in GitLab">
+                    <a
+                      href={mr.web_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`Open in ${repo.data?.provider === "github" ? "GitHub" : "GitLab"}`}
+                    >
                       <ExternalLink size={14} />
                     </a>
                   </td>
